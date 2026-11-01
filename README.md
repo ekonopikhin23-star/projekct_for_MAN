@@ -1,1 +1,1 @@
-# projekct_for_MAN
+# .github.io
