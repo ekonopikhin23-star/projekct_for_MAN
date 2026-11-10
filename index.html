@@ -1,0 +1,1044 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="repo" content="OWNER/REPO">
+<title>Квіз і карта</title>
+<script type="module">
+import { initAuth, onAuthChange, getCurrentUser } from './auth-ui.js';
+import { packsApi } from './supabase-client.js';
+
+await initAuth();
+
+onAuthChange((user) => {
+  if (document.getElementById('shop').hidden === false) refreshShopUI();
+});
+
+// Нова showShop — вставте ЦЕЙ КОД замість старої функції showShop у вашому index.html
+window.showShop = async function showShop(msg) {
+  const S = document.getElementById('shop');
+  const user = getCurrentUser();
+
+  S.innerHTML = `
+    <h2>🛠 Майстерня</h2>
+    <p class="sub">Теми квізів і питання на карті від спільноти. Опублікуйте свій пакет — він потрапить на модерацію.</p>
+    ${user ? `
+      <div class="toolbar" style="margin-bottom:16px">
+        <button class="btn" id="btn-create-pack">＋ Створити пакет</button>
+        <button class="btn ghost sm" id="btn-my-packs">Мої пакети</button>
+      </div>` : `
+      <p class="sub" style="margin-bottom:16px"><button class="btn ghost sm" id="btn-login-shop">Увійдіть</button>, щоб публікувати пакети.</p>
+    `}
+    <div class="toolbar">
+      <input type="text" id="sq" placeholder="Пошук" aria-label="Пошук">
+      <select id="sk" aria-label="Тип"><option value="all">Усе</option><option value="theme">Теми квізів</option><option value="map">Питання на карті</option></select>
+      <select id="so" aria-label="Сортування"><option value="new">Нові</option><option value="az">За назвою</option><option value="popular">Популярні</option></select>
+    </div>
+    <div class="res fm" role="status">${msg ? escapeHtml(msg) : ''}</div>
+    <div class="shopgrid" id="pg">Завантаження…</div>
+    <div id="pubbox"></div>`;
+
+  S.querySelector('#sq')?.addEventListener('input', debounce(() => renderGrid(), 300));
+  S.querySelector('#sk')?.addEventListener('change', () => renderGrid());
+  S.querySelector('#so')?.addEventListener('change', () => renderGrid());
+  S.querySelector('#btn-create-pack')?.addEventListener('click', showCreatePackForm);
+  S.querySelector('#btn-my-packs')?.addEventListener('click', showMyPacks);
+  S.querySelector('#btn-login-shop')?.addEventListener('click', () => import('./auth-ui.js').then(m => m.showAuthModal('login')));
+
+  await renderGrid();
+};
+
+let currentFilters = { kind: 'all', sort: 'new', search: '' };
+let allPacksCache = [];
+
+async function renderGrid() {
+  const pg = document.getElementById('pg'), fm = document.querySelector('#shop .fm');
+  currentFilters.search = document.getElementById('sq')?.value.trim().toLowerCase() || '';
+  currentFilters.kind = document.getElementById('sk')?.value || 'all';
+  currentFilters.sort = document.getElementById('so')?.value || 'new';
+  pg.innerHTML = 'Завантаження…';
+  try {
+    const { packs, total } = await packsApi.getApproved({ kind: currentFilters.kind, search: currentFilters.search, sort: currentFilters.sort, limit: 50 });
+    allPacksCache = packs;
+    fm.textContent = `Знайдено: ${total} пакет${total===1?'':total<5?'и':'ів'}`;
+    renderPacks(packs);
+  } catch (e) { pg.textContent = `Помилка: ${e.message}`; }
+}
+
+async function renderPacks(packs) {
+  const pg = document.getElementById('pg');
+  if (!packs.length) { pg.textContent = 'Тут поки порожньо. Будьте першим!'; return; }
+  const user = getCurrentUser();
+  const likedSet = user ? await packsApi.getLikesForPacks(packs.map(p => p.id)) : new Set();
+  pg.innerHTML = packs.map(p => {
+    const isLiked = likedSet.has(p.id);
+    const authorLink = p.profiles?.github_login ? `<a href="https://github.com/${p.profiles.github_login}" target="_blank" rel="noopener">@${p.profiles.github_login}</a>` : (p.profiles?.username || 'Анонім');
+    return `<article class="pack" style="--c:${p.color}"><div class="ph">${escapeHtml(String(p.icon||'📦').slice(0,8))}</div>
+      <div class="pb"><b>${escapeHtml(p.title)}</b><small>${p.kind==='map'?'Питання на карті':'Тема квізу'} · ${p.question_count} пит. · ${authorLink}</small>
+      <p>${escapeHtml(p.description||'').slice(0,120)}</p></div>
+      <div class="pa"><button class="btn sm ${isLiked?'liked':''}" data-like="${p.id}" title="${isLiked?'Прибрати лайк':'Лайк'}">${isLiked?'❤️':'🤍'} <span class="like-count">${p.likes||0}</span></button>
+      <button class="btn ghost sm" data-add="${p.id}">＋ Додати</button></div></article>`;
+  }).join('');
+  pg.querySelectorAll('[data-like]').forEach(btn => { btn.onclick = async () => { const packId=btn.dataset.like; btn.disabled=true; try{const {liked}=await packsApi.toggleLike(packId); const ce=btn.querySelector('.like-count'); ce.textContent=+ce.textContent+(liked?1:-1); btn.classList.toggle('liked',liked); btn.innerHTML=`${liked?'❤️':'🤍'} <span class="like-count">${ce.textContent}</span>`;}catch(e){alert(e.message)} btn.disabled=false; }; });
+  pg.querySelectorAll('[data-add]').forEach(btn => { btn.onclick = async () => { const pack=allPacksCache.find(p=>p.id===btn.dataset.add); if(!pack)return; btn.disabled=true; try{const data={format:'quiz-geo-pack',v:1,kind:pack.kind,...(pack.kind==='theme'?{theme:pack.data}:{map:pack.data})}; alert(importData(JSON.stringify(data))+' Знайдете у «Квізи» або «Де це?».');}catch(e){alert('Помилка: '+e.message)} btn.disabled=false; }; });
+}
+
+function showCreatePackForm() {
+  const S=document.getElementById('shop');
+  S.innerHTML=`<h2>🛠 Майстерня</h2><div class="stage" style="max-width:560px"><h3>Новий пакет</h3>
+    <div class="f"><label>Тип <select id="pk-kind"><option value="theme">Тема квізу</option><option value="map">Питання на карті</option></select></label>
+    <label>Назва в майстерні <input type="text" id="pk-title" maxlength="40" required></label>
+    <label>Іконка <input type="text" id="pk-icon" maxlength="8" value="📦"></label>
+    <label>Колір <input type="color" id="pk-color" value="#1c7ed6"></label>
+    <label>Опис <textarea id="pk-desc" maxlength="120" rows="2"></textarea></label></div>
+    <div id="pk-content"></div><div class="row"><button class="btn" id="pk-submit">Надіслати на модерацію</button><button class="btn ghost" id="pk-cancel">Скасувати</button></div><p class="fm" id="pk-msg"></p></div>`;
+  document.getElementById('pk-kind').onchange=renderPackContent; renderPackContent();
+  document.getElementById('pk-submit').onclick=submitPack; document.getElementById('pk-cancel').onclick=()=>showShop();
+}
+
+function renderPackContent() {
+  const kind=document.getElementById('pk-kind').value, cd=document.getElementById('pk-content');
+  if(kind==='theme'){ const themes=JSON.parse(localStorage.getItem('quizThemes')||'[]'); if(!themes.length){cd.innerHTML='<p class="sub err">Немає тем. Створіть тему у вкладці «Квіз».</p>';return} cd.innerHTML=`<label>Оберіть тему: <select id="pk-theme">${themes.map((t,i)=>`<option value="${i}">${escapeHtml(t.name)} (${t.qs.length} пит.)</option>`).join('')}</select></label>`; }
+  else{ const mapQs=JSON.parse(localStorage.getItem('geoMap')||'[]'); if(!mapQs.length){cd.innerHTML='<p class="sub err">Немає питань на карті. Додайте їх у вкладці «Де це?».</p>';return} cd.innerHTML=`<p class="sub">Буде опубліковано ${mapQs.length} питань з вашої карти.</p>`; }
+}
+
+async function submitPack() {
+  const msgEl=document.getElementById('pk-msg'), kind=document.getElementById('pk-kind').value, title=document.getElementById('pk-title').value.trim();
+  const icon=document.getElementById('pk-icon').value.slice(0,8)||'📦', color=document.getElementById('pk-color').value, desc=document.getElementById('pk-desc').value.trim();
+  if(!title){msgEl.textContent='Введіть назву';msgEl.style.color='var(--bad)';return}
+  let data; if(kind==='theme'){const themes=JSON.parse(localStorage.getItem('quizThemes')||'[]'); const t=themes[+document.getElementById('pk-theme').value]; data={format:'quiz-geo-pack',v:1,kind:'theme',theme:t};} else {const map=JSON.parse(localStorage.getItem('geoMap')||'[]'); data={format:'quiz-geo-pack',v:1,kind:'map',map};}
+  msgEl.textContent='Відправка…';msgEl.style.color='var(--mute)';
+  try{const pack=await packsApi.create({kind,title,icon,color,description:desc,data,question_count:kind==='theme'?data.theme.qs.length:data.map.length}); msgEl.textContent=`Пакет "${pack.title}" надіслано на модерацію!`; msgEl.style.color='var(--ok)'; setTimeout(()=>showShop(),2000);} catch(e){msgEl.textContent=e.message;msgEl.style.color='var(--bad)';}
+}
+
+async function showMyPacks() {
+  const user=getCurrentUser(); if(!user)return; const packs=await packsApi.getMine(); const S=document.getElementById('shop');
+  S.innerHTML=`<h2>🛠 Майстерня</h2><div class="toolbar"><button class="btn ghost sm" id="back-shop">← Назад</button></div><div class="shopgrid" id="my-packs">${packs.length?packs.map(renderMyPackCard).join(''):'<p class="sub">У вас ще немає пакетів.</p>'}</div>`;
+  document.getElementById('back-shop').onclick=()=>showShop();
+  packs.forEach(p=>{const card=document.querySelector(`[data-mypack="${p.id}"]`); card?.querySelector('.edit')?.addEventListener('click',()=>editMyPack(p)); card?.querySelector('.delete')?.addEventListener('click',()=>deleteMyPack(p.id));});
+}
+
+function renderMyPackCard(p){const sl={pending:'🟡 На модерації',approved:'🟢 Схвалено',rejected:'🔴 Відхилено'}[p.status]; return `<article class="pack" data-mypack="${p.id}" style="--c:${p.color}"><div class="ph">${escapeHtml(String(p.icon||'📦').slice(0,8))}</div><div class="pb"><b>${escapeHtml(p.title)}</b><small>${p.kind==='map'?'Карта':'Квіз'} · ${p.question_count} пит. · ${sl}</small>${p.rejection_reason?`<p class="err" style="margin-top:4px">Причина: ${escapeHtml(p.rejection_reason)}</p>`:''}<p>${escapeHtml(p.description||'').slice(0,120)}</p></div><div class="pa">${p.status!=='approved'?`<button class="btn ghost sm edit">✏️ Редагувати</button>`:''}<button class="btn ghost sm delete">🗑 Видалити</button></div></article>`;}
+async function editMyPack(pack){if(confirm('Відкрити форму для редагування? Поточний пакет буде видалено.')){await packsApi.delete(pack.id); showCreatePackForm();}}
+async function deleteMyPack(id){if(confirm('Видалити цей пакет?')){await packsApi.delete(id); showMyPacks();}}
+
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function debounce(fn,ms){let t;return(...a)=>{clearTimeout(t);t=setTimeout(()=>fn(...a),ms);};}
+</script>
+<script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+<style>:root{
+  box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px);
+  padding-bottom:env(safe-area-inset-bottom,0px);
+  /* Colors */
+  --bg:#e9f1f4;--card:#fff;--ink:#12263a;--mute:#5b6f80;--line:#c6d6df;
+  --acc:#2447d6;--acc-ink:#fff;--ok:#16895a;--bad:#c93a52;
+  --sea:#cfe3ee;--land:#f6f3e4;--pin:#e89b00;
+  /* Unified radius system - modern theme */
+  --radius-sm:4px;
+  --radius-md:8px;
+  --radius-lg:12px;
+  --radius-xl:16px;
+  --radius-pill:999px;
+  --radius-circle:50%;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0d1b28;--card:#152838;--ink:#e6eef3;--mute:#8ea4b5;--line:#2a4256;
+    --acc:#6f8cff;--acc-ink:#0d1b28;--ok:#3fc08a;--bad:#ff7088;
+    --sea:#0f2434;--land:#223a4c;--pin:#ffb62e
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0d1b28;--card:#152838;--ink:#e6eef3;--mute:#8ea4b5;--line:#2a4256;
+  --acc:#6f8cff;--acc-ink:#0d1b28;--ok:#3fc08a;--bad:#ff7088;
+  --sea:#0f2434;--land:#223a4c;--pin:#ffb62e
+}
+*{box-sizing:border-box}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 "Segoe UI",system-ui,-apple-system,Roboto,sans-serif}
+.wrap{max-width:860px;margin:0 auto;padding:20px 16px 40px}
+header{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin-bottom:20px}
+h1{font:800 clamp(26px,5vw,38px)/1.05 "Arial Rounded MT Bold","Trebuchet MS",system-ui,sans-serif;margin:0;letter-spacing:-.02em}
+nav{display:flex;background:var(--card);border:2px solid var(--ink);border-radius:var(--radius-pill);padding:3px}
+nav button{border:0;background:none;color:var(--ink);font:inherit;font-weight:700;padding:8px 18px;border-radius:var(--radius-pill);cursor:pointer}
+nav button.on{background:var(--ink);color:var(--bg)}
+button:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
+h2{font-size:20px;margin:0 0 4px}
+.sub{color:var(--mute);margin:0 0 16px}
+.themes{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
+.theme{background:var(--card);border:2px solid var(--ink);border-radius:var(--radius-md);padding:14px;text-align:left;cursor:pointer;color:var(--ink);font:inherit;box-shadow:4px 4px 0 var(--ink);transition:transform .12s,box-shadow .12s}
+.theme:hover{transform:translate(2px,2px);box-shadow:2px 2px 0 var(--ink)}
+.theme b{display:block;font-size:18px}.theme span{color:var(--mute);font-size:14px}
+.bar{height:8px;background:var(--line);border-radius:var(--radius-sm);overflow:hidden;margin-bottom:14px}
+.bar i{display:block;height:100%;background:var(--acc);transition:width .3s}
+.meta{display:flex;justify-content:space-between;color:var(--mute);font-size:14px;margin-bottom:6px}
+.q{font-size:clamp(20px,3.6vw,26px);font-weight:700;line-height:1.25;margin:0 0 16px;max-width:30em}
+.opts{display:grid;gap:10px}
+.opt{background:var(--card);border:2px solid var(--line);border-radius:var(--radius-lg);padding:13px 16px;text-align:left;font:inherit;font-size:17px;color:var(--ink);cursor:pointer}
+.opt:hover:not(:disabled){border-color:var(--acc)}
+.opt.ok{border-color:var(--ok);background:color-mix(in srgb,var(--ok) 18%,var(--card))}
+.opt.bad{border-color:var(--bad);background:color-mix(in srgb,var(--bad) 16%,var(--card))}
+.btn{background:var(--acc);color:var(--acc-ink);border:0;border-radius:var(--radius-lg);padding:12px 22px;font:inherit;font-weight:700;cursor:pointer}
+.btn.ghost{background:none;color:var(--ink);border:2px solid var(--ink)}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
+.end{text-align:center;padding:28px 8px}
+.big{font:800 64px/1 "Arial Rounded MT Bold",system-ui,sans-serif}
+.clue{background:var(--card);border:2px solid var(--ink);border-radius:var(--radius-md);padding:12px 16px;margin-bottom:12px}
+.clue small{color:var(--mute);display:block}
+.clue b{font-size:19px}
+.mapbox{position:relative;border:2px solid var(--ink);border-radius:var(--radius-md);overflow:hidden;background:var(--sea);aspect-ratio:2/1;touch-action:none;cursor:crosshair}
+.mapbox svg{display:block;width:100%;height:100%}
+.land{fill:var(--land);stroke:var(--ink);stroke-width:1;vector-effect:non-scaling-stroke;stroke-linejoin:round}
+.grid{fill:none;stroke:var(--line);stroke-width:1;vector-effect:non-scaling-stroke;opacity:.7}
+.link{stroke:var(--ink);stroke-width:2;stroke-dasharray:6 5;vector-effect:non-scaling-stroke}
+.zoom{position:absolute;right:8px;top:8px;display:grid;gap:6px}
+.zoom button{width:34px;height:34px;border-radius:var(--radius-sm);border:2px solid var(--ink);background:var(--card);color:var(--ink);font-size:20px;font-weight:700;cursor:pointer}
+.res{min-height:52px;margin-top:12px}
+.res b{font-size:18px}
+.score{font-weight:700}
+.stage{border:2px solid var(--ink);border-radius:var(--radius-xl);padding:18px;color:var(--ink);box-shadow:5px 5px 0 var(--ink)}
+.stage.end{padding:28px 16px;text-align:center}
+.sh{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px}
+.sh b{font-size:19px}
+.back{background:none;border:0;color:var(--ink);font:inherit;text-decoration:underline;cursor:pointer;padding:4px}
+.stage .meta,.stage .sub{color:var(--mute)}
+.theme .ti{display:block;font-size:30px;line-height:1.2;color:inherit}
+.theme.add{border-style:dashed;box-shadow:none;background:transparent;color:var(--ink);min-height:110px}
+.cw{position:relative;display:grid}
+.cw .theme{height:100%}
+.ed{position:absolute;right:8px;top:8px;width:32px;height:32px;border-radius:var(--radius-sm);border:2px solid var(--ink);background:var(--card);color:var(--ink);cursor:pointer}
+.react{min-height:44px;margin-top:14px;font-weight:700;font-size:18px}
+.react.yes{color:var(--ok)}
+.err{color:var(--bad)}
+.react.pop span{display:inline-block;animation:pop .35s cubic-bezier(.3,1.6,.5,1)}
+@keyframes pop{from{transform:scale(.5);opacity:0}to{transform:none;opacity:1}}
+.f{display:grid;gap:6px;margin-bottom:14px}
+.f>span,.f>label{font-weight:700}
+.stage input[type=text],.stage textarea{width:100%;font:inherit;padding:8px 10px;border-radius:var(--radius-sm);border:2px solid var(--line);background:var(--card);color:var(--ink)}
+.stage input.inv{border-color:var(--bad)}
+.tw{overflow-x:auto}
+.tw table{border-collapse:collapse;min-width:760px;width:100%}
+.tw th{text-align:left;font-size:13px;color:var(--mute);padding:2px 4px}
+.tw td{padding:3px}
+.tw td:first-child input{min-width:220px}
+.pick{display:flex;flex-wrap:wrap;gap:8px}
+.pick button{width:40px;height:40px;border-radius:var(--radius-sm);border:2px solid var(--line);background:var(--card);font-size:20px;cursor:pointer;color:var(--ink)}
+.pick button.on{border-color:var(--ink);box-shadow:2px 2px 0 var(--ink)}
+.pick .sw{border-radius:var(--radius-circle)}
+:root{--riv:#2f7fbf}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--riv:#6fb4ff}}
+:root[data-theme="dark"]{--riv:#6fb4ff}
+.sea{fill:var(--sea);stroke:var(--ink);stroke-width:1;vector-effect:non-scaling-stroke;stroke-linejoin:round}
+.riv{fill:none;stroke:var(--riv);stroke-width:1.3;vector-effect:non-scaling-stroke;stroke-linecap:round;stroke-linejoin:round}
+.rhl{fill:none;stroke:var(--ok);stroke-width:4;vector-effect:non-scaling-stroke;stroke-linecap:round;stroke-linejoin:round}
+.clue .hint{display:block;color:var(--mute);font-size:14px}
+[hidden]{display:none!important}
+body{-webkit-text-size-adjust:100%;min-height:100vh;background:var(--page,var(--bg));background-size:var(--ps,auto);background-attachment:fixed}
+:root{--pg-sky:#e9f1f4;--pg-sunset:linear-gradient(160deg,#ffe2c4,#ffb5a3 50%,#b8a9ff);--pg-mint:linear-gradient(180deg,#e3f7ec,#bfe8d6);--pg-night:linear-gradient(180deg,#0b1626,#1b2c4f);
+--pg-paper:linear-gradient(#0000 23px,#2447d622 24px),linear-gradient(90deg,#0000 23px,#2447d622 24px),#f7f8fb;
+--pg-bliss:radial-gradient(120% 55% at 15% 112%,#4aa02c 0 58%,#0000 59%),radial-gradient(100% 45% at 95% 118%,#2f8a1c 0 55%,#0000 56%),linear-gradient(#5b9be8,#bcdcfa 62%,#e8f4ff)}
+html[data-bg=auto]:root{--page:var(--bg)}
+html[data-bg=sky]:root,html[data-bg=sunset]:root,html[data-bg=mint]:root,html[data-bg=paper]:root,html[data-bg=bliss]:root{--bg:#e9f1f4;--card:#fff;--ink:#12263a;--mute:#5b6f80;--line:#c6d6df;--acc:#2447d6;--acc-ink:#fff;--ok:#16895a;--bad:#c93a52;--sea:#cfe3ee;--land:#f6f3e4;--pin:#e89b00;--riv:#2f7fbf}
+html[data-bg=sky]:root{--page:var(--pg-sky)}html[data-bg=sunset]:root{--page:var(--pg-sunset)}html[data-bg=mint]:root{--page:var(--pg-mint)}
+html[data-bg=paper]:root{--page:var(--pg-paper);--ps:24px 24px,24px 24px,auto}html[data-bg=bliss]:root{--page:var(--pg-bliss)}
+html[data-bg=night]:root{--page:var(--pg-night);--bg:#0d1b28;--card:#152838;--ink:#e6eef3;--mute:#8ea4b5;--line:#2a4256;--acc:#6f8cff;--acc-ink:#0d1b28;--ok:#3fc08a;--bad:#ff7088;--sea:#0f2434;--land:#223a4c;--pin:#ffb62e;--riv:#6fb4ff}
+.hr{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.sm{padding:8px 14px;font-size:14px}
+.opts{background:var(--card);border:2px solid var(--ink);border-radius:var(--radius-md);padding:14px;margin-bottom:16px}
+.pick .pk{width:auto;height:auto;padding:8px 12px;display:flex;align-items:center;gap:8px;font:inherit;font-size:15px}
+.sw2{display:inline-block;width:24px;height:16px;border:1px solid var(--ink);border-radius:var(--radius-sm);background-size:cover}
+.tbar,#tb{display:none}
+.ua{fill:#ffd50040;stroke:#0057b8;stroke-width:1.6;vector-effect:non-scaling-stroke;stroke-linejoin:round}
+.terr{fill:#16895a33;stroke:var(--ok);stroke-width:2;stroke-dasharray:6 4;vector-effect:non-scaling-stroke}
+.qi{display:block;max-width:100%;max-height:260px;margin:0 0 14px;border-radius:var(--radius-lg);border:2px solid var(--line);object-fit:contain;background:#fff}
+.th{width:48px;height:48px;object-fit:cover;border-radius:var(--radius-sm);border:1px solid var(--line);vertical-align:middle;margin-right:4px}
+.imgb{display:inline-block;padding:6px 8px;border:2px dashed var(--line);border-radius:var(--radius-sm);cursor:pointer;font-size:14px;white-space:nowrap}
+.ic{white-space:nowrap}
+.mi{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 12px;margin-bottom:6px;background:var(--card);border:2px solid var(--line);border-radius:var(--radius-md)}
+.filelb{display:inline-block;cursor:pointer}
+.fm{min-height:24px;margin-top:8px;font-weight:600}
+.stage input[type=range]{width:100%;accent-color:var(--acc)}
+.stage .mapbox{margin-top:2px}
+/* Windows XP - unified radius tokens with XP values */
+html[data-skin=xp] body{font-family:Tahoma,Verdana,'Segoe UI',sans-serif;padding-bottom:46px}
+html[data-skin=xp] .win{
+  --card:#fff;--ink:#000;--mute:#4b4b4b;--line:#aca899;--acc:#245edb;--acc-ink:#fff;--bg:#ece9d8;--ok:#1b7a2f;--bad:#b22222;--sea:#bcd6ee;--land:#f1ecc9;--riv:#2a6ac0;--pin:#ff9800;
+  --radius-sm:3px;
+  --radius-md:4px;
+  --radius-lg:4px;
+  --radius-xl:6px;
+  --radius-pill:4px 4px 0 0;
+  --radius-circle:50%;
+  background:#ece9d8;border:1px solid #0831d9;border-radius:var(--radius-xl) var(--radius-xl) 0 0;box-shadow:4px 6px 16px #0007;overflow:hidden;color:#000}
+html[data-skin=xp] .tbar{display:flex;justify-content:space-between;align-items:center;padding:5px 6px 5px 10px;color:#fff;font-weight:700;text-shadow:1px 1px #0a2a7a;
+ background:linear-gradient(#3c8cf5 0,#0a5fdb 8%,#0853d4 50%,#0a5fdb 92%,#0742b8 100%)}
+.wb i{display:inline-grid;place-items:center;width:22px;height:22px;margin-left:3px;border:1px solid #fff;border-radius:var(--radius-sm);background:linear-gradient(#5b9cf7,#1f5fd8);font-style:normal;font-size:12px}
+.wb i.x{background:linear-gradient(#e8957f,#c8401a)}
+html[data-skin=xp] .wbody{padding:12px 14px 16px}
+html[data-skin=xp] h1,html[data-skin=xp] h2{font-family:Tahoma,Verdana,sans-serif;color:#003399;letter-spacing:0}
+html[data-skin=xp] h1{font-size:22px}
+html[data-skin=xp] .stage h2,html[data-skin=xp] .stage .sh b{color:inherit}
+html[data-skin=xp] nav{background:none;border:0;border-bottom:1px solid #919b9c;border-radius:0;padding:0 4px;gap:2px}
+html[data-skin=xp] nav button{border:1px solid #919b9c;border-bottom:0;border-radius:var(--radius-pill);background:linear-gradient(#fff,#ece9d8);padding:6px 16px;font-weight:400;color:#000}
+html[data-skin=xp] nav button.on{background:#fff;font-weight:700;color:#000;box-shadow:inset 0 3px #ffb02e}
+html[data-skin=xp] .btn{background:linear-gradient(#fff 0,#ece9d8 85%,#d6d0c0);color:#000;border:1px solid #003c74;border-radius:var(--radius-sm);font-weight:400}
+html[data-skin=xp] .btn:hover:not(:disabled){box-shadow:inset 0 0 0 2px #f9c859}
+html[data-skin=xp] .btn.ghost{background:linear-gradient(#fff 0,#ece9d8 85%,#d6d0c0)}
+html[data-skin=xp] .theme{border:1px solid #7f9db9;border-radius:var(--radius-md);box-shadow:none}
+html[data-skin=xp] .theme:hover{transform:none;box-shadow:inset 0 0 0 2px #f9c859}
+html[data-skin=xp] .stage,html[data-skin=xp] .clue,html[data-skin=xp] .opts,html[data-skin=xp] .mapbox,html[data-skin=xp] .mi{border-width:1px;border-color:#7f9db9;border-radius:var(--radius-md);box-shadow:none}
+html[data-skin=xp] .opt{border:1px solid #7f9db9;border-radius:var(--radius-sm)}
+html[data-skin=xp] .pick button{border:1px solid #7f9db9;border-radius:var(--radius-sm)}
+html[data-skin=xp] #tb{display:flex;align-items:stretch;position:fixed;left:0;right:0;bottom:0;height:34px;z-index:50;box-sizing:content-box;padding-bottom:env(safe-area-inset-bottom,0px);
+ background:linear-gradient(#3168d5 0,#4993e6 6%,#2a62d6 12%,#245edb 88%,#1941a5 100%)}
+#st{border:0;color:#fff;font:italic 700 17px Tahoma,Verdana,sans-serif;padding:0 22px 0 12px;cursor:pointer;text-shadow:1px 1px 2px #0007;border-radius:0 var(--radius-lg) var(--radius-lg) 0;background:linear-gradient(#5fb85f,#3c9a3c 12%,#2d7d2d 85%,#1f6a1f)}
+.task{align-self:center;margin-left:8px;padding:3px 14px;background:#1f4fc0;border:1px solid #0b2f86;color:#fff;border-radius:var(--radius-sm);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#clk{margin-left:auto;display:flex;align-items:center;padding:0 14px;color:#fff;font-size:13px;background:linear-gradient(#0f8fe8,#1e7cd5);border-left:1px solid #0b3a9a}
+/* Телефон */
+@media (max-width:640px){
+ .wrap{padding:12px 10px 28px}
+ h1{font-size:26px}
+ header{gap:8px}
+ .hr{width:100%}nav{flex:1}nav button{flex:1;padding:10px 8px}
+ .themes{grid-template-columns:1fr 1fr;gap:10px}
+ .theme{padding:12px}
+ .stage{padding:14px;border-radius:var(--radius-lg);box-shadow:3px 3px 0 var(--ink)}
+ .opt{padding:14px;font-size:16px}
+ .btn{min-height:46px}
+ .row .btn{flex:1 1 auto}
+ .big{font-size:48px}
+ .mapbox{aspect-ratio:4/3}
+ .zoom button{width:40px;height:40px}
+ .tw table,.tw tbody{display:block;min-width:0;width:100%}
+ .tw thead{display:none}
+ .tw tr{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:10px;margin-bottom:10px;border:2px solid var(--line);border-radius:var(--radius-lg)}
+ .tw td{display:block;padding:0}
+ .tw td:nth-child(-n+2),.tw td:last-child{grid-column:1/-1}
+ .tw td:last-child{text-align:right}
+ .tw td:first-child input{min-width:0}
+ .stage input[type=text],.stage textarea,.stage input[type=range]{font-size:16px}
+ .pick .pk{flex:1 1 40%}
+ html[data-skin=xp] .wbody{padding:10px}
+ html[data-skin=xp] .task{display:none}
+ html[data-skin=xp] .win{border-radius:var(--radius-xl) var(--radius-xl) 0 0}
+}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.toolbar input,.toolbar select,.pubf input,.pubf select{font:inherit;padding:8px 10px;border:2px solid var(--line);border-radius:var(--radius-sm);background:var(--card);color:var(--ink);min-width:0}
+.toolbar input{flex:1 1 160px}
+.pubf{display:grid;gap:8px;max-width:520px}
+.shopgrid{display:grid;gap:12px}
+.pack{display:flex;gap:12px;align-items:center;background:var(--card);border:2px solid var(--ink);border-left:8px solid var(--c);border-radius:var(--radius-md);padding:12px}
+.ph{font-size:34px;line-height:1}
+.pb{flex:1;min-width:0}
+.pb small{display:block;color:var(--mute)}
+.pb p{margin:2px 0 0;font-size:14px;overflow-wrap:anywhere}
+.pa{display:grid;gap:6px;justify-items:end}.steps{margin:12px 0 0;padding-left:22px}.steps li{margin-bottom:6px}
+.back:disabled{opacity:.4;cursor:default;text-decoration:none}
+html[data-skin=xp] .pack{border-width:1px;border-left-width:6px;border-radius:var(--radius-md)}
+@media (max-width:640px){.pack{flex-wrap:wrap}.pa{grid-auto-flow:column;justify-items:start;width:100%}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}</style>
+</head>
+<body>
+<div class="wrap"><div class="win">
+<div class="tbar" aria-hidden="true"><span>🌍 Квіз і карта</span><span class="wb"><i>_</i><i>▢</i><i class="x">✕</i></span></div>
+<div class="wbody">
+<header><h1>Квіз і карта</h1>
+<div class="hr"><nav><button id="tq" class="on">Квіз</button><button id="tg">Де це?</button><button id="tw">🛠 Майстерня</button></nav><button id="op" class="btn ghost sm">🎨 Оформлення</button></div></header>
+<section id="opts" class="opts" hidden></section>
+<main id="quiz"></main>
+<main id="geo" hidden></main>
+<main id="shop" hidden></main>
+</div></div></div>
+<div id="tb"><button id="st">⊞ пуск</button><span class="task">🌍 Квіз і карта</span><span id="clk"></span></div>
+<script>
+const $=s=>document.querySelector(s);
+const sh=a=>[...a].sort(()=>Math.random()-.5);
+const store={get(k){try{return +localStorage.getItem(k)||0}catch(e){return 0}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
+
+/* ---------- Квіз: перша відповідь у списку — правильна ---------- */
+const T={
+"Україна":[["Яка столиця України?","Київ","Львів","Харків","Одеса"],["Яка найвища гора України?","Говерла","Піп Іван","Петрос","Бребенескул"],["Яка річка тече через Київ?","Дніпро","Дністер","Тиса","Південний Буг"],["Яке місто називають містом Лева?","Львів","Чернівці","Ужгород","Луцьк"],["Хто автор збірки «Кобзар»?","Тарас Шевченко","Іван Франко","Леся Українка","Григорій Сковорода"],["Яка грошова одиниця в Україні?","Гривня","Злотий","Лей","Форинт"],["У якому році Україна проголосила незалежність?","1991","1989","1996","2004"]],
+"Наука":[["Який хімічний символ має золото?","Au","Ag","Fe","Go"],["Скільки кісток у дорослої людини?","206","180","230","300"],["Який газ переважає в атмосфері Землі?","Азот","Кисень","Вуглекислий газ","Аргон"],["Хто сформулював закон всесвітнього тяжіння?","Ньютон","Ейнштейн","Галілей","Кеплер"],["Чому дорівнює швидкість світла (приблизно)?","300 000 км/с","150 000 км/с","30 000 км/с","1 000 000 км/с"]],
+"Історія":[["У якому році почалася Друга світова війна?","1939","1941","1914","1945"],["Хто був першим президентом США?","Джордж Вашингтон","Авраам Лінкольн","Томас Джефферсон","Бенджамін Франклін"],["Яка цивілізація збудувала Мачу-Пікчу?","Інки","Майя","Ацтеки","Ольмеки"],["У якому році впала Берлінська стіна?","1989","1991","1985","1979"],["Кого розбили під Ватерлоо 1815 року?","Наполеона","Людовіка XIV","Карла Великого","Фрідріха Великого"]],
+"Тварини":[["Яка наземна тварина найшвидша?","Гепард","Лев","Антилопа","Кінь"],["Скільки сердець у восьминога?","3","1","2","4"],["Який ссавець уміє літати?","Кажан","Білка-летяга","Колібрі","Сова"],["Який птах найбільший?","Африканський страус","Альбатрос","Ему","Кондор"],["Як називається дитинча кенгуру?","Джоуї","Пупс","Теля","Щеня"]],
+"Космос":[["Яка планета найбільша в Сонячній системі?","Юпітер","Сатурн","Нептун","Земля"],["Хто першим ступив на поверхню Місяця?","Ніл Армстронг","Базз Олдрін","Конопіхін Єгор ","Майкл Коллінз"],["Скільки планет у Сонячній системі?","8","9","7","10"],["Як називається наша галактика?","Чумацький Шлях","Андромеда","Трикутник","Сомбреро"],["Яку планету називають Червоною?","Марс","Венера","Меркурій","Юпітер"]],
+"Географія":[["Яка країна повністю розташована в Європі й має найбільшу площу?","Україна","Франція","Іспанія","Німеччина"],["Яка столиця Австралії?","Канберра","Сідней","Мельбурн","Перт"],["Яка гора найвища у світі?","Еверест","К2","Монблан","Кіліманджаро"],["Який океан найбільший?","Тихий","Атлантичний","Індійський","Північний Льодовитий"],["Яка столиця Канади?","Оттава","Торонто","Монреаль","Ванкувер"]],
+"Технології":[["Що означає абревіатура HTML?","HyperText Markup Language","High Tech Modern Language","Home Tool Markup Level","Hyper Transfer Mode Link"],["Хто заснував компанію Microsoft?","Білл Гейтс","Стів Джобс","Ілон Маск","Конопіхін Єгор"],["Скільки бітів в одному байті?","8","4","16","10"],["Яка мова відповідає за інтерактивність на сайтах?","JavaScript","CSS","SQL","Photoshop"],["У якому році випустили перший iPhone?","2007","2003","2010","1999"]]
+};
+const enc=s=>encodeURIComponent(s).replace(/[!'()*]/g,c=>"%"+c.charCodeAt(0).toString(16));
+const svg=(w,h,b)=>`url(data:image/svg+xml,${enc(`<svg xmlns='http://www.w3.org/2000/svg' width='${w}' height='${h}'>${b}</svg>`)})`;
+const stars=(()=>{let s="",x=7;const r=()=>(x=(x*16807)%2147483647)/2147483647;
+  for(let i=0;i<46;i++)s+=`<circle cx='${r()*300|0}' cy='${r()*300|0}' r='${(.5+r()*1.1).toFixed(1)}' fill='white' fill-opacity='${(.3+r()*.6).toFixed(2)}'/>`;
+  return s+`<circle cx='238' cy='62' r='26' fill='#a98bff' fill-opacity='.22'/><ellipse cx='238' cy='62' rx='46' ry='9' fill='none' stroke='#a98bff' stroke-opacity='.35' stroke-width='3' transform='rotate(-20 238 62)'/>`})();
+const paw=`<ellipse cx='20' cy='29' rx='8' ry='6.5'/><circle cx='10' cy='18' r='3.4'/><circle cx='17' cy='11' r='3.4'/><circle cx='25' cy='11' r='3.4'/><circle cx='31' cy='18' r='3.4'/>`;
+const TH={
+"Наука":{i:"🔬",f:"'Segoe UI',system-ui,sans-serif",bg:"#e6f6f3",card:"#fff",ink:"#0b3b36",acc:"#0e8a7c",line:"#b5ddd6",
+ pat:svg(56,100,`<g fill='none' stroke='#0e8a7c' stroke-opacity='.22' stroke-width='1.5'><path d='M28 66L0 50L0 16L28 0L56 16L56 50L28 66L28 100'/><path d='M28 0L28 34L0 50L0 84L28 100L56 84L56 50L28 34'/></g><circle cx='28' cy='34' r='3' fill='#0e8a7c' fill-opacity='.3'/>`),ps:"56px 100px"},
+"Історія":{i:"🏛️",f:"Georgia,'Times New Roman',serif",bg:"#efe3cf",card:"#fbf4e6",ink:"#3b2412",acc:"#8c4a1f",line:"#d3bd98",
+ pat:svg(64,44,`<path d='M0 44V24a16 16 0 0 1 32 0V44M32 44V24a16 16 0 0 1 32 0V44M0 3H64' fill='none' stroke='#8c4a1f' stroke-opacity='.2' stroke-width='2'/>`)+",radial-gradient(ellipse at center,transparent 45%,#8c4a1f2e 100%)",ps:"64px 44px,auto"},
+"Тварини":{i:"🦊",f:"'Arial Rounded MT Bold','Trebuchet MS',sans-serif",bg:"#e6f4d9",card:"#fff",ink:"#1f3a14",acc:"#c2570c",line:"#c3dba9",
+ pat:svg(84,84,`<g fill='#c2570c' fill-opacity='.15'>${paw}</g><g fill='#c2570c' fill-opacity='.15' transform='translate(42 42) rotate(28 20 20)'>${paw}</g>`),ps:"84px 84px"},
+"Космос":{i:"🚀",f:"'Trebuchet MS',system-ui,sans-serif",bg:"#120b2e",card:"#1f1547",ink:"#ece8ff",acc:"#a98bff",ai:"#120b2e",line:"#3a2d7a",dk:1,
+ pat:svg(300,300,stars)+",radial-gradient(circle at 85% 0%,#4b34b866,transparent 55%)",ps:"300px 300px,auto"},
+"Географія":{i:"🧭",f:"system-ui,sans-serif",bg:"#dcecf7",card:"#fff",ink:"#0f2a46",acc:"#1f6fd1",line:"#b5cfe6",
+ pat:svg(120,60,`<path d='M0 15C20 0 40 30 60 15S100 0 120 15M0 45C20 30 40 60 60 45S100 30 120 45' fill='none' stroke='#1f6fd1' stroke-opacity='.22' stroke-width='1.5'/><circle cx='95' cy='30' r='3' fill='#1f6fd1' fill-opacity='.25'/>`),ps:"120px 60px"},
+"Технології":{i:"💻",f:"Consolas,Menlo,'Courier New',monospace",bg:"#0b1410",card:"#10201a",ink:"#d6ffe9",acc:"#2bd47d",ai:"#0b1410",line:"#1f4a38",dk:1,
+ pat:svg(90,90,`<g fill='none' stroke='#2bd47d' stroke-opacity='.25' stroke-width='1.5'><path d='M0 22H28L40 34V62L52 74H90'/><path d='M90 12H64L52 24'/><path d='M10 90V70L22 58'/></g><g fill='#10201a' stroke='#2bd47d' stroke-opacity='.45' stroke-width='1.5'><circle cx='28' cy='22' r='3'/><circle cx='52' cy='24' r='3'/><circle cx='22' cy='58' r='3'/><circle cx='52' cy='74' r='3'/></g>`),ps:"90px 90px"}
+};
+const EM=["📚","🎬","⚽","🍕","🎵","🌿","🧠","🎮","🚗","🏰","🎨","🐶"],COL=["#d6336c","#e8590c","#2f9e44","#1c7ed6","#7048e8","#0c8599"];
+const PH=["🎉 Так!","⭐ Супер!","🎯 Точно в ціль!","💥 Блискуче!","👏 Правильно!","🚀 Чудово!"];
+const rnd=a=>a[Math.random()*a.length|0];
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+TH["Україна"]={i:"🌻",f:"'Trebuchet MS',system-ui,sans-serif",bg:"#fff1a8",card:"#fffdf0",ink:"#0a2a5e",acc:"#0057b8",line:"#e6d36a",
+ pat:svg(36,36,`<path d='M16 6h4v8h8v4h-8v8h-4v-8H8v-4h8z' fill='#0057b8' fill-opacity='.16'/>`),ps:"36px 36px"};
+const stOf=t=>`--bg:${t.bg};--card:${t.card};--ink:${t.ink};--acc:${t.acc};--acc-ink:${t.ai||"#fff"};--line:${t.line};--mute:color-mix(in srgb,${t.ink} 62%,${t.bg});${t.dk?"--ok:#3fc08a;--bad:#ff7088":"--ok:#16895a;--bad:#c93a52"};background-color:${t.bg};background-image:${t.pat};background-size:${t.ps||"auto"};font-family:${t.f}`;
+const cust=(c,ic)=>`--bg:color-mix(in srgb,${c} 14%,#fff);--card:#fff;--ink:#1b2230;--acc:${c};--acc-ink:#fff;--line:color-mix(in srgb,${c} 30%,#fff);--mute:#5a6475;--ok:#16895a;--bad:#c93a52;background-color:var(--bg);background-image:${svg(80,80,`<text x='6' y='34' font-size='28' opacity='.17'>${ic}</text><text x='44' y='70' font-size='20' opacity='.13'>${ic}</text>`)};background-size:80px 80px;font-family:'Trebuchet MS',system-ui,sans-serif`;
+
+/* ---- збереження у браузері ---- */
+const ld=k=>{try{return JSON.parse(localStorage.getItem(k))||[]}catch(e){return []}};
+const stor=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));return true}catch(e){return false}};
+let C=ld("customThemes").map(c=>({...c,qs:(c.qs||[]).map(x=>Array.isArray(x)?{q:x[0],o:x.slice(1)}:x)})),CM=ld("customMap");
+const saveC=()=>stor("customThemes",C),saveM=()=>stor("customMap",CM);
+const all=()=>[...Object.keys(T).map(k=>({name:k,icon:TH[k].i,qs:T[k].map(a=>({q:a[0],o:a.slice(1)})),st:stOf(TH[k]),key:k})),...C.map((c,i)=>({name:c.name,icon:c.icon,qs:c.qs,st:cust(c.color,c.icon),key:"c:"+c.name,ci:i}))];
+const Q=$("#quiz"),qq=s=>Q.querySelector(s);
+
+/* ---- файли: збереження й відкриття ---- */
+const clean=s=>String(s==null?"":s).slice(0,300);
+async function saveFile(name,data,box){
+  let d=null;try{d=window.claude&&await window.claude.use("downloads")}catch(e){}
+  if(d){try{await d.save({filename:name,data:data});return "Файл збережено."}catch(e){if(e&&e.code=="declined")return "Збереження скасовано."}}
+  try{
+    let blob;
+    if(data instanceof ArrayBuffer || data instanceof Uint8Array){
+      blob=new Blob([data],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+    }else if(typeof data==="string"){
+      blob=new Blob([data],{type:"application/octet-stream"});
+    }else{
+      blob=new Blob([data],{type:"application/octet-stream"});
+    }
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download=name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href),5000);
+    return "Файл збережено.";
+  }catch(e){}
+  box.innerHTML=`<div class="f"><label>Прямо тут зберегти файл не вдалося.</label></div>`;
+  return "";
+}const fileBar=()=>`<div class="row"><button class="btn ghost" data-f="out">💾 JSON</button><button class="btn ghost" data-f="out-xlsx">📊 Excel (.xlsx)</button><button class="btn ghost" data-f="out-csv">📄 CSV</button><label class="btn ghost filelb">📂 Відкрити з файлу<input type="file" accept=".json,application/json,.xlsx,.csv" hidden data-f="in"></label></div><div class="res fm" role="status"></div><div class="fx"></div>`;
+function shrink(file,cb){
+  const fr=new FileReader();
+  fr.onload=()=>{const im=new Image();
+    im.onload=()=>{const k=Math.min(1,480/Math.max(im.width,im.height)),c=document.createElement("canvas");c.width=Math.max(1,Math.round(im.width*k));c.height=Math.max(1,Math.round(im.height*k));
+      const x=c.getContext("2d");x.fillStyle="#fff";x.fillRect(0,0,c.width,c.height);x.drawImage(im,0,0,c.width,c.height);cb(c.toDataURL("image/jpeg",.72))};
+    im.onerror=()=>cb(null);im.src=fr.result};
+  fr.onerror=()=>cb(null);fr.readAsDataURL(file);
+}
+
+function burst(x,y,n,em){
+  if(matchMedia("(prefers-reduced-motion:reduce)").matches)return;
+  for(let i=0;i<n;i++){const s=document.createElement("span"),a=Math.random()*6.283,d=70+Math.random()*130;
+    s.textContent=em[i%em.length];s.style.cssText=`position:fixed;left:${x}px;top:${y}px;font-size:${16+Math.random()*16}px;pointer-events:none;z-index:99`;
+    document.body.appendChild(s);
+    s.animate([{transform:"translate(-50%,-50%) scale(.4)",opacity:1},{transform:`translate(calc(-50% + ${Math.cos(a)*d}px),calc(-50% + ${Math.sin(a)*d+70}px)) rotate(${Math.random()*360}deg)`,opacity:0}],{duration:900+Math.random()*600,easing:"cubic-bezier(.2,.7,.3,1)"}).onfinish=()=>s.remove();}
+}
+
+function themes(msg){
+  const L=all();
+  Q.innerHTML='<h2>Оберіть тему</h2><p class="sub">До 10 питань у темі. Власну тему можна створити з таблиці й додати до питань малюнки.</p><div class="themes">'+
+  L.map((t,i)=>`<div class="cw"><button class="theme" data-i="${i}" style="${t.st}"><span class="ti">${t.icon}</span><b>${esc(t.name)}</b><span>Рекорд: ${store.get("best:"+t.key)} з ${Math.min(10,t.qs.length)}</span></button>${t.ci!=null?`<button class="ed" data-e="${t.ci}" aria-label="Редагувати тему">✎</button>`:""}</div>`).join("")+
+  '<button class="theme add" id="add"><span class="ti">＋</span><b>Створити свою тему</b><span>З таблиці або вручну</span></button></div>'+fileBar();
+  Q.querySelectorAll(".theme[data-i]").forEach(b=>b.onclick=()=>startQuiz(L[b.dataset.i]));
+  Q.querySelectorAll(".ed").forEach(b=>b.onclick=()=>editor(+b.dataset.e));
+  qq("#add").onclick=()=>editor(null);
+  bindFile(Q,themes);qq(".fm").textContent=msg||"";
+}
+
+function startQuiz(t){
+  const qs=sh(t.qs).slice(0,10),fx=["🎉","✨",t.icon];let i=0,ok=0,run=0;
+  (function show(){
+    if(i>=qs.length)return finish();
+    const q=qs[i],opts=sh(q.o);
+    Q.innerHTML=`<section class="stage" style="${t.st}"><div class="sh"><b>${t.icon} ${esc(t.name)}</b><button class="back" id="bk">← Теми</button></div>
+    <div class="meta"><span>Питання ${i+1} з ${qs.length}</span><span>Правильно: ${ok}</span></div>
+    <div class="bar"><i style="width:${i/qs.length*100}%"></i></div>
+    ${q.img?`<img class="qi" src="${q.img}" alt="Малюнок до питання">`:""}<p class="q">${esc(q.q)}</p><div class="opts">${opts.map(o=>`<button class="opt">${esc(o)}</button>`).join("")}</div>
+    <div class="react" id="rc" aria-live="polite"></div><div class="row" id="nx"></div></section>`;
+    qq("#bk").onclick=()=>themes();
+    Q.querySelectorAll(".opt").forEach(b=>b.onclick=()=>{
+      const good=b.textContent===q.o[0],rc=qq("#rc");
+      Q.querySelectorAll(".opt").forEach(x=>{x.disabled=true;if(x.textContent===q.o[0])x.classList.add("ok")});
+      if(good){ok++;run++;const r=b.getBoundingClientRect();burst(r.left+r.width/2,r.top+r.height/2,run>2?24:14,fx);
+        rc.innerHTML=`<span>${rnd(PH)}${run>1?` Серія: ${run} 🔥`:""}</span>`;rc.className="react pop yes"}
+      else{b.classList.add("bad");run=0;rc.innerHTML="<span>Не цього разу. Правильна відповідь підсвічена.</span>";rc.className="react pop"}
+      const n=document.createElement("button");n.className="btn";n.textContent=i+1<qs.length?"Далі":"Показати результат";
+      n.onclick=()=>{i++;show()};qq("#nx").appendChild(n);n.focus();
+    });
+  })();
+  function finish(){
+    const k="best:"+t.key,prev=store.get(k);if(ok>prev)store.set(k,ok);
+    const perfect=ok==qs.length,msg=perfect?"Бездоганно!":ok>=qs.length*.8?"Чудовий результат":ok>=qs.length*.6?"Непогано":"Спробуйте ще раз";
+    Q.innerHTML=`<section class="stage end" style="${t.st}"><div class="big">${perfect?"🏆":t.icon}</div><div class="big">${ok}/${qs.length}</div><h2>${msg}</h2><p class="sub">Тема: ${esc(t.name)}${ok>prev?" · новий рекорд":""}</p>
+    <div class="row" style="justify-content:center"><button class="btn" id="a">Ще раз</button><button class="btn ghost" id="b">Інша тема</button></div></section>`;
+    qq("#a").onclick=()=>startQuiz(t);qq("#b").onclick=()=>themes();
+    if(perfect)for(let n=0;n<6;n++)setTimeout(()=>burst(innerWidth*(.15+Math.random()*.7),innerHeight*.35,26,["🎉","🎊","⭐",t.icon]),n*180);
+    else if(ok>=qs.length*.6)burst(innerWidth/2,innerHeight*.3,24,["✨",t.icon]);
+  }
+}
+
+const parse=t=>t.split(/\r?\n/).map(l=>{const d=l.includes("\t")?"\t":l.includes(";")?";":",";return l.split(d).map(s=>s.trim().replace(/^"|"$/g,""))})
+  .filter(r=>r.length>1&&r[0]).filter((r,i)=>!(i==0&&/^питання$/i.test(r[0]))).map(r=>[r[0],r[1]||"",r[2]||"",r[3]||"",r[4]||"",""]);
+const HD=["Питання","Правильна відповідь","Хибна 1","Хибна 2","Хибна 3"];
+const csvCell=v=>/[;"\n\r]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;
+
+function editor(ci){
+  const s=ci!=null?C[ci]:null,blank=()=>["","","","","",""];
+  const ed={name:s?s.name:"",icon:s?s.icon:EM[0],color:s?s.color:COL[3],rows:s?s.qs.map(q=>[q.q,q.o[0]||"",q.o[1]||"",q.o[2]||"",q.o[3]||"",q.img||""]):[blank(),blank(),blank()],bad:[],msg:"",sure:false,paste:false};
+  draw();
+  function draw(){
+    Q.innerHTML=`<section class="stage" style="${cust(ed.color,ed.icon)}"><div class="sh"><b>${ed.icon} ${ci!=null?"Редагування теми":"Нова тема"}</b><button class="back" id="bk">← Скасувати</button></div>
+    <div class="f"><label for="en">Назва теми</label><input type="text" id="en" maxlength="30" value="${esc(ed.name)}" placeholder="Наприклад, Фільми"></div>
+    <div class="f"><span>Іконка</span><div class="pick">${EM.map(e=>`<button data-e="${e}" class="${e==ed.icon?"on":""}" aria-label="Іконка ${e}">${e}</button>`).join("")}</div></div>
+    <div class="f"><span>Колір</span><div class="pick">${COL.map(c=>`<button data-c="${c}" class="sw ${c==ed.color?"on":""}" style="background:${c}" aria-label="Колір ${c}"></button>`).join("")}</div></div>
+    <div class="f"><span>Питання: у кожному рядку одна правильна й до трьох хибних відповідей, за бажанням ще й малюнок</span><div class="tw"><table><thead><tr>${HD.map(h=>`<th>${h}</th>`).join("")}<th>Малюнок</th><th></th></tr></thead><tbody>
+    ${ed.rows.map((r,y)=>`<tr>${r.slice(0,5).map((v,x)=>`<td><input type="text" data-y="${y}" data-x="${x}" class="${ed.bad.includes(y)?"inv":""}" value="${esc(v)}" placeholder="${HD[x]}" aria-label="${HD[x]}, рядок ${y+1}"></td>`).join("")}
+    <td class="ic">${r[5]?`<img class="th" src="${r[5]}" alt="Малюнок"><button class="back" data-ri="${y}" aria-label="Прибрати малюнок">✕</button>`:`<label class="imgb">🖼 Малюнок<input type="file" accept="image/*" hidden data-im="${y}"></label>`}</td>
+    <td><button class="back" data-d="${y}" aria-label="Видалити рядок ${y+1}">✕</button></td></tr>`).join("")}</tbody></table></div></div>
+    <div class="row"><button class="btn ghost" id="ar">＋ Додати рядок</button><button class="btn ghost" id="pt">Вставити з таблиці</button><button class="btn ghost" id="cv">Таблиця у CSV</button></div>
+    ${ed.paste?`<div class="f" style="margin-top:12px"><label for="pa">Скопіюйте клітинки з Excel або Google Таблиць і вставте сюди. Колонки: питання, правильна відповідь, хибні відповіді.</label><textarea id="pa" rows="5"></textarea><div><button class="btn" id="po">Додати в таблицю</button></div></div>`:""}
+    <div class="fx"></div><div class="react err" id="em" role="alert">${ed.msg}</div>
+    <div class="row" style="margin-top:4px"><button class="btn" id="sv">Зберегти тему</button>${ci!=null?`<button class="btn ghost" id="dl">${ed.sure?"Точно видалити?":"Видалити тему"}</button>`:""}</div></section>`;
+    qq("#bk").onclick=()=>themes();
+    qq("#en").oninput=e=>ed.name=e.target.value;
+    Q.querySelectorAll("[data-e]").forEach(b=>b.onclick=()=>{ed.icon=b.dataset.e;draw()});
+    Q.querySelectorAll("[data-c]").forEach(b=>b.onclick=()=>{ed.color=b.dataset.c;draw()});
+    Q.querySelectorAll("td input[type=text]").forEach(n=>n.oninput=()=>{ed.rows[+n.dataset.y][+n.dataset.x]=n.value});
+    Q.querySelectorAll("[data-d]").forEach(b=>b.onclick=()=>{ed.rows.splice(+b.dataset.d,1);if(!ed.rows.length)ed.rows.push(blank());ed.bad=[];draw()});
+    Q.querySelectorAll("[data-ri]").forEach(b=>b.onclick=()=>{ed.rows[+b.dataset.ri][5]="";draw()});
+    Q.querySelectorAll("[data-im]").forEach(n=>n.onchange=()=>{const f=n.files[0],y=+n.dataset.im;if(!f)return;
+      shrink(f,u=>{if(u){ed.rows[y][5]=u;ed.msg=""}else ed.msg="Не вдалося прочитати малюнок.";draw()})});
+    qq("#ar").onclick=()=>{ed.rows.push(blank());draw()};
+    qq("#pt").onclick=()=>{ed.paste=!ed.paste;draw()};
+    qq("#cv").onclick=async()=>{
+      const rs=ed.rows.filter(r=>r.slice(0,5).some(v=>v.trim()));
+      if(!rs.length){ed.msg="У таблиці ще немає питань.";return draw()}
+      const csv="\ufeff"+[HD,...rs.map(r=>r.slice(0,5))].map(r=>r.map(csvCell).join(";")).join("\r\n");
+      const m=await saveFile("quiz-theme.csv",csv,qq(".fx"));qq("#em").textContent=m?m+" Малюнки в CSV не зберігаються.":""};
+    if(ed.paste)qq("#po").onclick=()=>{const p=parse(qq("#pa").value);
+      if(p.length){ed.rows=ed.rows.filter(r=>r.some(Boolean)).concat(p);ed.msg="";ed.paste=false}else ed.msg="Не вдалося розпізнати рядки. Потрібні щонайменше дві колонки.";draw()};
+    qq("#sv").onclick=save;
+    if(qq("#dl"))qq("#dl").onclick=()=>{if(!ed.sure){ed.sure=true;draw();return}C.splice(ci,1);saveC();themes()};
+  }
+  function save(){
+    const rows=ed.rows.filter(r=>r.some(v=>v.trim()));ed.bad=[];
+    rows.forEach(r=>{if(!r[0].trim()||!r[1].trim()||!r.slice(2,5).some(v=>v.trim()))ed.bad.push(ed.rows.indexOf(r))});
+    if(ed.bad.length){ed.msg="Заповніть питання, правильну й хоча б одну хибну відповідь у підсвічених рядках.";return draw()}
+    if(rows.length<3){ed.msg="Потрібно щонайменше 3 питання.";return draw()}
+    const o={name:ed.name.trim()||"Моя тема",icon:ed.icon,color:ed.color,qs:rows.map(r=>({q:r[0].trim(),o:[r[1].trim(),...r.slice(2,5).map(v=>v.trim()).filter(Boolean)],...(r[5]?{img:r[5]}:{})}))};
+    if(ci!=null)C[ci]=o;else C.push(o);
+    themes(saveC()?"":"Тему збережено лише до закриття сторінки: у браузері бракує місця (мабуть, багато малюнків). Збережіть її у файл.");
+  }
+}
+themes();
+
+/* ---------- Гра «Де це?» ---------- */
+const LAND=[
+// Північна Америка
+[-168,65.5,-166,68.5,-156,71.3,-141,69.6,-128,70,-115,68,-108,68,-95,70,-85,69.5,-82,66,-86,64,-93,61,-94,58.8,-92,57,-86,55.5,-82,53,-79,51.5,-78.5,55,-77,60,-78,62.3,-72,61.5,-68,58.5,-64,60,-62,57,-60,55,-56,52,-59,50.3,-64,50.2,-67,49.2,-69.5,47.7,-66,48.1,-64.5,48.8,-64.8,47.8,-64.8,46.8,-62,45.7,-61,45.2,-63.5,44.5,-66,43.7,-66.2,44.7,-67,44.8,-70,43.7,-70.7,42.7,-70,41.8,-71.5,41.4,-74,40.5,-74,39.5,-75.5,38.3,-76,37,-75.6,35.3,-77,34.5,-79,33.2,-81,31.8,-81.3,30,-80.3,27,-80.2,25.5,-81.1,25.2,-82,26.6,-82.8,28.5,-83.5,29.8,-85,29.7,-87,30.4,-89,30.3,-89.3,29.2,-91,29.2,-93.8,29.7,-95,29,-97.2,27.5,-97.5,25,-97.8,22.2,-96.3,19.2,-95,18.5,-92,18.6,-90.7,19.3,-90.4,21,-87,21.5,-87.5,18.5,-88.3,16,-88.5,15.8,-85,15.9,-83.3,15,-83.7,11,-82,9,-79.5,9.6,-77.5,8.6,-78,7.5,-80,7.3,-81.8,8.2,-83.5,8.5,-85.7,10,-87.5,13,-91.5,14,-94.2,16.2,-97,15.8,-101,17.3,-105.2,19.8,-105.6,22.5,-108,25,-109.6,26.5,-112.4,29.5,-114.8,31.7,-115.5,32.6,-117.1,32.5,-118.5,34,-120.6,34.5,-121.9,36.6,-122.5,37.8,-123.8,39.5,-124.4,40.4,-124.1,42.5,-124,46.2,-124.7,48.4,-123.1,48.2,-122.7,49,-123.3,49.4,-125,50.3,-127.5,51.5,-128.5,53,-130,54.7,-132,56.5,-133.5,58,-135.5,59.5,-139,59.9,-144,60,-148,60.5,-152,60.5,-151.5,59.2,-153,58.5,-156,56.8,-158.5,56,-162,55,-164.8,54.6,-161,56,-158,58.6,-160,58.8,-162.5,59.9,-165,60.5,-165.3,62.5,-161,63.3,-161,64.5,-164,64.6,-166,64.7],
+[-114.8,31.7,-117,32.5,-115.7,30,-114,28,-112,24.5,-109.8,23,-110.2,24.2,-112.7,27.3,-114.6,30],
+[-73,78,-60,82,-30,83.5,-20,81.5,-18,76,-22,70,-32,68,-41,64,-44,60,-50,61.5,-53,66,-55,70,-60,76],
+[-24,65.5,-22,66.4,-14.5,66.3,-13.5,65,-18,63.5,-22.5,63.8],
+[-89,70,-82,73.5,-72,71.5,-62,67.5,-65,63,-73,64,-78,65,-75,67.5,-86,68],[-118,70,-105,73,-100,70,-110,68.5],[-90,76.5,-75,79,-62,82,-80,83,-92,80],
+[-59,47.6,-53,46.7,-52.7,47.7,-55.5,51.5,-57,50.7],[-85,22,-82,23.2,-77,21.8,-74.2,20.2,-77.5,19.9,-80,21.7],[-74.4,18.6,-72,19.9,-68.4,18.6,-71,17.7],
+// Південна Америка
+[-77.5,8.6,-75.5,10.8,-72,12,-68,10.5,-64,10.6,-62,10.7,-60.5,8.5,-57,6,-52,5,-50,1.5,-50,-0.5,-44.5,-2.5,-39,-3.5,-35,-5.2,-34.8,-8,-37.5,-12,-39,-15,-39.2,-18,-41,-22,-43.2,-23,-46,-24,-48.5,-26,-48.8,-28.5,-51,-31,-53.5,-34,-56,-34.9,-58.3,-34.3,-57,-36.2,-57.5,-38.2,-62,-39,-62.2,-41,-65,-41,-64,-43,-66,-45,-67.5,-46.5,-66,-48,-69,-51.5,-68.5,-52.5,-70,-54,-72,-53,-74,-50,-75.5,-47,-74,-43,-73.7,-39,-71.6,-33,-71.5,-30,-70.3,-26,-70.2,-18.5,-75.5,-15,-77.5,-12,-79.5,-7.5,-81.2,-5.8,-80,-3,-80.5,0,-79,2,-77.5,4,-77.3,7],
+// Африка
+[-5.5,35.9,-2,35.1,3,36.8,10,37.2,11,33.5,15,32.3,20,32.2,20,30.8,25,31.8,29,30.9,32,31.2,32.5,29.9,33.6,27.3,35,24,37.3,19.5,39.2,15.5,43,12.7,43.3,11.5,51.2,11.8,49,6,46,2,41,-1.5,39.2,-5,38.8,-8.5,40.5,-11,40.5,-15,35,-19.5,35.5,-24,32.8,-26,31,-29.8,27,-33.5,22,-34.2,18.5,-34.3,17.8,-31,15,-27,14.5,-22,11.8,-17,13.5,-12,12.2,-6,9.3,-1,9.5,3.5,6,4.3,4,6.3,-1,5,-4,5.2,-7.5,4.4,-11.5,6.8,-13.2,9,-16.7,12.5,-17.4,14.7,-16.5,19,-17,21,-15,24.5,-13,27.5,-10,29.8,-9.7,31.5,-8.5,33.5,-6,35.8],
+[44,-25,47,-25,48.5,-22,50.3,-15.5,49.3,-12,47.5,-14.5,44,-17,43.5,-21],
+// Євразія
+[-5.4,36,-6.3,36.7,-7.4,37.2,-8.8,37,-9.5,38.8,-8.8,41.5,-9.2,43.1,-8,43.7,-3.8,43.5,-1.6,43.4,-1.2,44.7,-1.2,46,-2.7,47.3,-4.7,48.4,-3,48.8,-1.8,48.6,-1.2,49.6,0.3,49.5,1.6,50.1,1.7,50.9,3.4,51.3,4.2,52,5.2,53.2,7,53.5,8.7,54,8.1,55.5,8.2,57,10.6,57.7,9.7,55.3,10.2,54.5,11,54,14,53.9,16.5,54.2,19.5,54.4,21,55.5,21,57,24.3,57.5,23.5,58.5,24.5,59.4,28,59.5,30.2,59.9,29,60.1,25,60.3,22.8,60,21.4,61,21.5,63,24.2,65.8,22,65.8,20.5,63.8,17.2,62.5,17.5,60.7,18.5,59.5,16.5,57.8,16.2,56.5,14.2,55.4,12.8,56,11.5,58,10.5,59.5,8,58,5.5,59,5,62,8,63.5,12,65.5,15,68.3,19,70,24,71,28,71,31,69.7,34,66.8,41,66.5,44,68.2,55,68.5,60,68.7,68,68.8,72,73,80,72.5,87,75,95,76,100,76.5,105,77.7,110,76.5,113,73.8,127,73.5,130,71,140,72.5,150,71.5,160,69.5,170,69.8,174,69.8,180,68.8,180,65.5,177,62.5,172,61,169,60,164,62.5,160,61,163.5,59.5,162,56.5,160,54,158.6,53,156.7,50.8,156.7,54,156,57,155,59.4,152,59,149,59.2,145.5,59.4,142.5,59,138,56.2,135.5,54.5,138.5,54.2,140.5,53.5,141.3,52.3,140.3,48.5,138,46,135,43.8,133,43,131,42.3,129.7,41,127.5,39.8,128.5,38.6,129.5,37,129.3,35.2,128,34.8,126.3,34.5,126.5,37,125,38,124.2,39.8,121.5,39,122.2,40.5,121,40.9,118,39,119,37.2,120.5,37.7,122.5,37,121,36.5,119.5,34.5,120.8,32.5,122,30.5,121,28,119,25,116.5,23,113.5,22.2,111,21.5,110.5,20.2,109.8,21.4,108,21.5,106,20.5,106.5,19.3,108,17,109,15,109.3,12,106.8,10.3,105.2,8.6,104.5,10.5,102.5,12.2,100,12.5,100.5,6.5,102.5,6,103.5,4.5,104,1.5,103.5,1.4,101.5,3,100,7,98.5,10,98.2,13,97.5,16.5,94.5,16,94.2,18.3,92.3,20.7,91.8,22.3,90.5,22.3,88,21.7,86.8,21.2,84.8,19.3,82,17,80.2,15.7,80.2,13,79.2,10,77.5,8.1,76.3,9.6,74.8,12.8,73.5,16,72.8,19.2,70.5,20.9,68.2,23.5,66.5,25.4,61.5,25.2,57.5,25.7,56.4,27.2,54,26.7,51,28.9,49.5,30.2,48,29.9,49.5,27.5,50.2,26,51.5,24.5,54,24.2,56.4,26.3,56.3,25.1,58.5,23.7,59.8,22.5,57.5,19.5,55.5,17.5,52,16,48.5,14,45,12.8,43.2,13.5,42.7,16.5,41,19,39.5,21.5,38.5,23.5,36.5,26,35,28,34.9,29.5,34,27.9,32.6,29.9,32.4,31.1,34.2,31.3,34.9,32.8,35.8,34.2,36,36.7,34,36.2,32.5,36.1,30.5,36.4,28.5,36.6,27.5,37,26.5,38,27,39,26.3,40.2,26,40.8,24.3,40.8,22.6,40.5,23.1,39.1,24,38.2,23,37.5,22.5,36.5,21.8,36.9,20.7,38.3,20.2,39.7,19.4,40.4,19.4,41.9,18.5,42.4,17,43,15.2,43.5,13.9,44.7,13.7,45.6,12.3,45.3,12.5,43.8,14,42.5,15.9,41.9,17.2,41,18.5,40.1,16.7,40.5,17.1,39.4,16.5,38.9,15.7,38,15.8,40,13.7,41.2,12.2,41.7,10.5,42.8,10,44,8.8,44.4,7.3,43.7,5,43.4,3.1,43.2,3.2,41.9,0.8,41,-0.3,39.5,0.2,38.8,-0.7,37.6,-2,36.7,-4.4,36.7],
+[-5.7,50.1,1.4,51.2,1.7,52.7,0,53.5,-1.5,55.5,-2,56.5,-1.8,57.6,-3,58.6,-5,58.6,-6,57,-5.5,55.3,-4.8,54.8,-3.1,54.8,-3,53.4,-4.6,53.3,-4.3,52.2,-5.2,51.8,-3,51.4,-4.5,50.6],
+[-10,52,-9.8,54.2,-8.2,55.2,-6,55.2,-6,54,-6.2,52.2,-8,51.6],
+[12.4,38,15.6,38.3,15.1,36.7,12.5,37.7],[8.2,41,9.7,41,9.5,39.2,8.5,39],[23.5,35.3,26.3,35.2,24,35],[32.3,35,34.5,35.6,33.5,34.7],
+[52,71.2,57,70.8,68,76.5,62,76.6,56,74],[142,46,143.5,49,143,53,142.2,54,141.8,50],
+[130.2,31.3,131.8,32.8,132.6,33.9,134.5,34.2,135.5,33.5,136.8,34.3,138.8,34.7,140.9,35.5,141.2,38.2,142,39.5,141.5,41.4,140.3,41,139.8,39,138.5,37.5,136.7,36.9,135.5,35.6,133,35.5,131.5,34.5,130.8,33.9,129.8,33],
+[140,42,141.5,43.2,145.5,43.5,144,41.9,142,45.4,141.5,45.5,140.3,43.5],
+[120.2,22.7,121.5,25.2,122,24.8,121,22],[108.7,19.2,110.5,20.1,111,19.6,109.5,18.2],[79.8,9.5,81.8,7.5,81.2,6,80,6.2],
+[120,18,122.2,18.5,122,16,124,13.5,121,13.5,120.1,16],[122,7,126.5,9.5,126.2,6.5,124,6.5],
+[109,1.5,111,2.5,114.5,4.8,117,7,119,5,118,1,116.5,-3.5,114,-4,111,-3,110,-1.5],
+[95.3,5.5,98,4,104,-1,106,-3,105,-5.8,102,-4,98,0,96,3],[105.3,-6.8,108,-6.5,111,-6.5,114.5,-7.6,114.5,-8.4,108,-7.8,106,-7],
+[131,-1,135,-3.3,141,-2.6,145,-5,147.8,-6.2,150,-10.5,143,-9,141,-9.1,138,-8,135,-4.5,132.5,-4],
+// Австралія й Океанія
+[114,-22,116,-20.5,122,-18,126,-14,129.5,-15,131,-12,136.5,-12,135.5,-14.7,139.5,-17.5,141.6,-15,141.5,-12.5,142.8,-11,143.7,-14.5,145.5,-15,146.5,-19,149,-21,151,-23.5,153.2,-25.5,153,-29.5,151.3,-33,150,-37,147,-38.2,144.5,-38.4,140,-38,138.5,-35.5,137.5,-33.2,135.8,-34.8,134,-32.8,131,-31.5,129,-31.6,125,-32.5,122,-34,118,-35,115.2,-34.4,115,-33,115.7,-31.5,114.9,-29,113.5,-26],
+[144.7,-40.7,148.3,-40.9,148,-43.2,146.2,-43.6],
+[172.7,-34.4,175,-36,178.5,-37.7,175.2,-41.6,174.7,-39.5,173.8,-39.4],[172.7,-40.5,174.3,-41.6,171,-44.5,169,-46.6,166.5,-46,168,-44],
+[-180,-84,-150,-78,-120,-74,-80,-73,-62,-66,-58,-64,-60,-70,-45,-77,-30,-78,-10,-71,20,-70,50,-67,70,-68,90,-66,110,-66,140,-66,165,-70,180,-74,180,-90,-180,-90]
+];
+const WATER=[
+[28,41.5,31,41.1,35,42,38,41,41.5,41.5,40.8,43,38,44.5,37.5,45.2,36.5,45.4,35,45,33.5,44.4,32.5,45.4,33.5,46.1,31,46.5,30.7,46.2,29.7,45.2,28.8,44.2,28,43.4],
+[47,45,49,46.5,51,47,53,46.8,53,45,51,44.5,52.5,41.5,53,39.5,53.8,37.5,51,36.7,49,38,49,40.5,48,42,47,43.5],
+[58,46,60.5,46.5,61.5,45,59,44],[35.5,45.4,38,47,39,47,38.5,46,37,45.3],
+[-92,46.8,-88,48.5,-84.5,46.5,-87,46.5],[-87.8,42,-87,45.8,-85,45.8,-86,43.5],[-84,46,-80,44.8,-82.5,43.2,-83.5,44],[-83.4,41.7,-79,42.8,-80,42.2],[-79.8,43.4,-76.3,43.5,-76.3,44,-79,43.8]
+];
+const RV=[
+["Ніл","Найдовша річка Африки: тече на північ через пустелю до Середземного моря",[33.2,0.4,32,0.2,32.5,2.2,31.6,5,31.6,9.5,32.6,13,32.5,15.6,33.5,16.5,31.4,19.6,31.5,21.5,32.9,24,32.5,25.7,31,27,31.3,30,31,31.2]],
+["Амазонка","Найповноводніша річка світу, тече тропічними лісами Південної Америки",[-77.5,-5.5,-75.5,-4.5,-73.5,-4.5,-70.5,-4,-68,-3.5,-64,-3.5,-60,-3.1,-55,-2,-50,-0.5]],
+["Дунай","Тече через десять країн і впадає в Чорне море",[8.2,48,9,48.1,12,48.9,14.4,48.3,17,48.1,18.9,47.5,19,45.3,20.5,44.8,22.5,44.5,26,44.1,28,45.3,29.7,45.2]],
+["Дніпро","Головна річка України: тече повз Київ і впадає в Чорне море",[30.4,54.5,30.5,53,30.5,51.5,30.5,50.4,31.5,49.7,33.4,49.1,35,48.45,35.1,47.85,33.5,47,32.6,46.6,32.3,46.4]],
+["Рейн","Починається в Альпах, тече Німеччиною до Північного моря",[8.7,46.6,9.3,46.8,9.5,47.5,7.6,47.6,8.4,49,8.2,49.5,7.6,50,7,50.7,6.8,51.2,6,51.8,4.1,52]],
+["Міссісіпі","Велика річка США, тече на південь до Мексиканської затоки",[-95.2,47.2,-93.5,45,-91,42,-91.4,40.5,-91,38.7,-89.5,37,-90,35.2,-91,33.5,-91,31,-89.5,29.2]],
+["Янцзи","Найдовша річка Азії, тече Китаєм до Східнокитайського моря",[96,33.4,97,32,99,28,100,26.5,102,27,104,28.8,106.5,29.6,108,30.7,112,30,115,30,118,32,121.7,31.3]],
+["Хуанхе","Жовта річка Китаю, колиска давньої китайської цивілізації",[98,35,101,36.2,103.5,36.2,105,37.8,107,40.8,109.5,40.5,111,39,110.5,34.7,113,35,116,36.5,118.7,37.8]],
+["Ганг","Священна річка Індії, тече до Бенгальської затоки",[78.9,30.9,78.5,29.5,80.3,26.4,83,25.4,86,25.5,88.3,24,88.5,22]],
+["Конго","Глибоководна річка Центральної Африки, двічі перетинає екватор",[26.4,-11.5,27.2,-9,26.7,-5.5,26.2,-2.5,25.2,0.5,21.5,1.7,18.3,0.1,15.3,-4.3,12.4,-6]],
+["Тиса","Права притока Дунаю, тече через Закарпаття",[24.2,48.05,23.6,48,23,48.14,22.2,48.4,21,48.1,20.2,47.2,20.1,46.2,20.3,45.15]],
+["Дністер","Бере початок у Карпатах і впадає в Чорне море",[23,49.4,24.2,48.8,25.4,48.6,27,48.5,28.9,48.1,29.9,47.1,30.2,46.2]],
+["Південний Буг","Тече Поділлям і Миколаївщиною та впадає в Бузький лиман",[27,49.7,28,49.4,29,48.9,30.5,48.1,31.3,47.6,32,46.9]],
+["Прут","Карпатська річка, що тече на південь і впадає в Дунай",[24.5,48.1,25.9,48.3,26.9,48.2,27.5,47.2,28.1,46.2,28.2,45.5]],
+["Муррей","Головна річка Австралії на південному сході материка",[148.2,-36.6,147.5,-36,146,-36,143.5,-35.3,141,-34,139.2,-34.2,139.4,-35.5]],
+["Меконг","Тече Південно-Східною Азією через Лаос, Камбоджу й В'єтнам",[97.5,31.5,98.7,28,98,24,100.1,21.5,100,20.3,102.5,17.9,105.9,13.5,105.8,11.5,105.8,9.8]],
+["Ніґер","Велика річка Західної Африки, робить дугу через Малі й Нігерію",[-10.7,9.4,-8,12.6,-6.2,13.4,-5.5,15,-3,16.8,0,16.3,2.1,13.5,3.5,11.9,5,10.5,6.7,7.8,6,4.3]]
+];
+const UAR=["Дніпро","Дністер","Тиса","Південний Буг","Прут"];
+/* Україна в міжнародно визнаних кордонах */
+const UA=[22.15,48.4,22.55,49.08,22.85,49.6,23.5,50.4,24,50.85,23.6,51.5,24.3,51.9,26,51.9,27.5,51.6,28.6,51.5,30,51.4,30.8,51.7,31.8,52.1,33.4,52.35,34.4,51.75,35.4,51.1,36.4,50.3,37.5,50.4,38,49.9,39.4,49.75,40.1,49.5,39.9,48.8,39.75,48,38.8,47.7,38.2,47.1,37.5,47.05,36.8,46.75,36,46.65,35.3,46.4,34.7,46.2,35,45.7,35.3,45.2,36.6,45.4,36.4,45.1,35,44.8,34,44.45,33.5,44.4,32.5,45.4,33.2,45.9,33.6,46.15,32,46.5,31.5,46.6,30.8,46.5,30.4,46.05,29.7,45.2,29.3,45.4,28.2,45.5,28.9,46,29.65,46.3,29.8,46.9,29.4,47.5,29.1,48,28.4,48.2,27.5,48.45,26.6,48.25,26,48.2,25.2,47.95,24.9,47.7,24,47.9,23.2,48,22.9,47.95];
+const CITY=[
+["Париж","Місто, де стоїть Ейфелева вежа",2.35,48.86],["Каїр","Поруч із цим містом стоять піраміди Гізи",31.24,30.04],
+["Токіо","Столиця Японії з найлюднішим перехрестям Сібуя",139.69,35.69],["Ріо-де-Жанейро","Тут на горі стоїть статуя Христа-Спасителя",-43.17,-22.91],
+["Сідней","Місто з оперним театром у формі вітрил",151.21,-33.87],["Нью-Йорк","Місто зі Статуєю Свободи",-74,40.71],
+["Київ","Столиця України на Дніпрі, тут стоїть Софійський собор",30.52,50.45,1],
+["Ужгород","Місто на річці Уж біля кордону зі Словаччиною",22.29,48.62,1],["Львів","Місто Лева з історичним центром, що входить до списку ЮНЕСКО",24.03,49.84,1],
+["Одеса","Чорноморський порт із Потьомкінськими сходами",30.73,46.48,1],["Кейптаун","Місто біля підніжжя Столової гори",18.42,-33.92],
+["Аґра","Тут розташований Таджмахал",78.04,27.17],["Лондон","Місто з Біг-Беном",-0.13,51.51],["Рим","Тут стоїть Колізей",12.49,41.89],
+["Чичен-Іца","Стародавнє місто майя з пірамідою Ель-Кастільйо",-88.57,20.68],["Пекін","Столиця Китаю, поруч Велика китайська стіна",116.4,39.9],
+["Мачу-Пікчу","Загублене місто інків в Андах",-72.55,-13.16],["Стамбул","Місто на двох континентах, розділене Босфором",28.98,41.01],
+["Рейк'явік","Найпівнічніша столиця світу",-21.9,64.15],["Дубай","Місто з найвищою будівлею — Бурдж-Халіфа",55.27,25.2],
+["Сінгапур","Місто-держава на півдні Малаккського півострова",103.82,1.35],["Лос-Анджелес","Тут розташований Голлівуд",-118.24,34.05]
+];
+const UAC=[
+["Харків","Велике місто на сході України, перша столиця УСРР, університетське місто",36.23,49.99],["Дніпро","Велике місто на березі однойменної річки, у центрі країни",35.05,48.46],
+["Запоріжжя","Місто біля греблі Дніпровської ГЕС, поруч острів Хортиця",35.14,47.84],["Чернівці","Місто з університетом-резиденцією, внесеним до списку ЮНЕСКО",25.94,48.29],
+["Івано-Франківськ","Обласний центр Прикарпаття, раніше Станиславів",24.71,48.92],["Луцьк","Місто із замком Любарта на річці Стир",25.34,50.75],
+["Тернопіль","Місто із великим ставом у центрі, на річці Серет",25.59,49.55],["Хмельницький","Обласний центр на Південному Бузі, на Поділлі",26.99,49.42],
+["Вінниця","Місто на Південному Бузі, відоме світломузичним фонтаном",28.47,49.23],["Житомир","Місто на річці Тетерів, батьківщина Сергія Корольова",28.66,50.25],
+["Чернігів","Одне з найдавніших міст країни на Десні, з Борисоглібським собором",31.29,51.5],["Суми","Обласний центр на північному сході, на річці Псел",34.8,50.91],
+["Полтава","Обласний центр на річці Ворскла, відомий галушками",34.55,49.59],["Черкаси","Місто на березі Кременчуцького водосховища Дніпра",32.06,49.44],
+["Кропивницький","Місто на річці Інгул у центрі України, раніше Кіровоград",32.26,48.51],["Миколаїв","Місто суднобудівників на Південному Бузі",31.99,46.97],
+["Херсон","Місто, де Дніпро наближається до Чорного моря",32.62,46.64],["Рівне","Обласний центр Волині на річці Устя",26.25,50.62],
+["Маріуполь","Порт на узбережжі Азовського моря",37.55,47.1],["Сімферополь","Центр Кримського півострова",34.1,44.95],["Севастополь","Місто на узбережжі Чорного моря з руїнами Херсонеса",33.52,44.62],
+["Мукачево","Місто із замком «Паланок» у Закарпатті",22.72,48.44],["Кам'янець-Подільський","Місто з фортецею в петлі річки Смотрич",26.58,48.68],
+["Говерла","Найвища гора України, у Карпатах",24.5,48.16],["Хортиця","Найбільший острів на Дніпрі, колиска козацтва",35.07,47.82],
+["Асканія-Нова","Степовий біосферний заповідник на півдні",33.87,46.45],["Шацькі озера","Група озер на північному заході, національний природний парк",23.9,51.5],
+["Умань","Місто з дендропарком «Софіївка»",30.22,48.75],["Вилкове","«Українська Венеція» в дельті Дунаю",29.59,45.4],["Бахчисарай","Місто із Ханським палацом у Криму",33.86,44.75],["Синевир","Найбільше озеро Карпат",23.68,48.62]
+];
+const EVT=[
+["Чорнобиль","1986: сталася аварія на атомній електростанції, найбільша техногенна катастрофа ХХ століття",30.11,51.39,1],
+["Ватерлоо","1815: тут відбулася остання битва Наполеона",4.4,50.68],
+["Філадельфія","1776: тут ухвалили Декларацію незалежності США",-75.15,39.95],
+["Берлін","1989: впала стіна, що десятиліттями ділила місто навпіл",13.38,52.52],
+["Кракатау","1883: тут стався один із наймогутніших вулканічних вибухів в історії",105.42,-6.1],
+["Район загибелі «Титаніка»","1912: у цьому районі Атлантики затонув пасажирський лайнер",-49.95,41.73],
+["Кітті-Гок","1903: брати Райт здійснили перший політ на літаку",-75.7,36.06],
+["Грюнвальд","1410: відбулася одна з найбільших битв середньовічної Європи між польсько-литовським військом і Тевтонським орденом",20.1,53.48],
+["Помпеї","79 рік: місто поховало виверження Везувію",14.49,40.75],
+["Раннімід","1215: тут підписали Велику хартію вольностей",-0.56,51.44],
+["Нормандія","1944: на пляжах цього регіону висадилися союзники",-0.87,49.37],
+["Фукусіма","2011: потужний землетрус і цунамі спричинили аварію на АЕС",141.03,37.42],
+["Сан-Сальвадор","1492: сюди прибув Христофор Колумб, відкривши Америку для європейців",-74.5,24.05],
+["Афіни","1896: відбулися перші сучасні Олімпійські ігри",23.73,37.97],
+["Гастінгс","1066: відбулася битва, після якої Англію здобув Вільгельм Завойовник",0.49,50.91],
+["Хотин","1621: біля цієї фортеці на Дністрі відбулася велика битва козаків і поляків з османським військом",26.49,48.51,1]
+];
+const UAE=[
+["Корсунь-Шевченківський","1648: перемога козацьких військ Богдана Хмельницького над польською армією",31.26,49.42],
+["Берестечко","1651: тут відбулася одна з найбільших битв козацької доби",25.1,50.36],
+["Київ","24 серпня 1991: Верховна Рада проголосила незалежність України",30.52,50.45]
+];
+RV.forEach(r=>{const c=r[2],d=[];for(let i=0;i<c.length-2;i+=2){const n=Math.max(1,Math.ceil(Math.hypot(c[i+2]-c[i],c[i+3]-c[i+1])*2));for(let j=0;j<n;j++)d.push([c[i]+(c[i+2]-c[i])*j/n,c[i+1]+(c[i+3]-c[i+1])*j/n])}d.push([c[c.length-2],c[c.length-1]]);r.push(d)});
+const pl=(k,p,o)=>({k,n:p[0],c:p[1],x:p[2],y:p[3],...o});
+const POOL=[...CITY.map(p=>pl("c",p,{ua:p[4]})),...UAC.map(p=>pl("c",p,{only:1})),...RV.map((r,i)=>({k:"r",n:r[0],c:r[1],i,ua:UAR.includes(r[0])})),...EVT.map(p=>pl("e",p,{ua:p[4]})),...UAE.map(p=>pl("e",p,{only:1}))];
+const ASK={c:"Де це знаходиться?",r:"Клацніть будь-де на русло річки",e:"Де це сталося?",m:"Знайдіть на карті"};
+const MODES=[["mix","🌍","Усе разом","Міста, річки й події"],["c","🏙️","Міста","Знайдіть місто за підказкою"],["r","🌊","Річки","Клацніть на русло річки"],["e","📜","Події","Де сталася відома подія"],["ua","🌻","Україна","Міста, річки й події України"],["m","✏️","Мої питання","Питання, створені вами"]];
+const G=$("#geo"),gg=s=>G.querySelector(s);
+const rad=d=>d*Math.PI/180;
+function dist(a,b,c,d){const R=6371,dl=rad(c-a),dp=rad(d-b),x=Math.sin(dp/2)**2+Math.cos(rad(b))*Math.cos(rad(d))*Math.sin(dl/2)**2;return 2*R*Math.asin(Math.sqrt(x))}
+const near=(g,pts)=>pts.reduce((m,p)=>{const d=dist(g[0],g[1],p[0],p[1]);return d<m[0]?[d,p]:m},[1e9,null]);
+const flat=f=>f.map((v,i)=>i%2?90-v:v+180);
+const lineOf=f=>{const p=flat(f);let s="";for(let i=0;i<p.length;i+=2)s+=(i?"L":"M")+p[i]+" "+p[i+1];return s};
+const gridPath=()=>{let s="";for(let x=-150;x<=150;x+=30)s+=`M${x+180} 0V180`;for(let y=-60;y<=60;y+=30)s+=`M0 ${90-y}H360`;return s};
+
+const mapBox=()=>`<div class="mapbox" id="mb"><svg id="sv" viewBox="0 0 360 180" role="img" aria-label="Карта світу: торкніться, щоб поставити мітку">
+  <path class="grid" d="${gridPath()}"/>${LAND.map(l=>`<path class="land" d="${lineOf(l)}Z"/>`).join("")}${WATER.map(l=>`<path class="sea" d="${lineOf(l)}Z"/>`).join("")}
+  <path class="ua" d="${lineOf(UA)}Z"/>${RV.map(v=>`<path class="riv" d="${lineOf(v[2])}"/>`).join("")}<path id="hl" class="rhl" visibility="hidden"/>
+  <ellipse id="tr" class="terr" visibility="hidden"/><line id="ln" class="link" visibility="hidden"/>
+  <circle id="tp" fill="#16895a" stroke="#fff" stroke-width="2" vector-effect="non-scaling-stroke" visibility="hidden"/><circle id="gp" fill="var(--pin)" stroke="var(--ink)" stroke-width="2" vector-effect="non-scaling-stroke" visibility="hidden"/></svg>
+  <div class="zoom"><button id="zi" aria-label="Наблизити">+</button><button id="zo" aria-label="Віддалити">−</button></div></div>`;
+
+function mapInit(onPick){
+  const mb=gg("#mb"),sv=gg("#sv"),gp=gg("#gp"),tp=gg("#tp"),ln=gg("#ln"),hl=gg("#hl"),tr=gg("#tr");
+  const v={x:0,y:0,w:360,h:180},ar=()=>(mb.clientWidth/Math.max(1,mb.clientHeight))||2,px=()=>v.w/(mb.clientWidth||800);
+  const apply=()=>{v.w=Math.min(360,Math.max(3,v.w));v.h=v.w/ar();
+    v.x=v.w>=360?0:Math.max(0,Math.min(360-v.w,v.x));v.y=v.h>=180?(180-v.h)/2:Math.max(0,Math.min(180-v.h,v.y));
+    sv.setAttribute("viewBox",`${v.x} ${v.y} ${v.w} ${v.h}`);gp.setAttribute("r",9*px());tp.setAttribute("r",9*px())};
+  const setView=(cx,cy,w)=>{v.w=w;v.h=w/ar();v.x=cx-v.w/2;v.y=cy-v.h/2;apply()};
+  const zoomAt=(f,sx,sy)=>{const nw=Math.min(360,Math.max(3,v.w*f)),k=nw/v.w;v.x=sx-(sx-v.x)*k;v.y=sy-(sy-v.y)*k;v.w=nw;apply()};
+  const toSvg=e=>{const b=mb.getBoundingClientRect();return[v.x+(e.clientX-b.left)/(b.width||1)*v.w,v.y+(e.clientY-b.top)/(b.height||1)*v.h]};
+  gg("#zi").onclick=()=>zoomAt(.5,v.x+v.w/2,v.y+v.h/2);gg("#zo").onclick=()=>zoomAt(2,v.x+v.w/2,v.y+v.h/2);
+  mb.addEventListener("wheel",e=>{e.preventDefault();const[sx,sy]=toSvg(e);zoomAt(e.deltaY<0?.8:1.25,sx,sy)},{passive:false});
+  const P=new Map();let drag=null,pinch=null;
+  mb.addEventListener("pointerdown",e=>{if(e.target.closest(".zoom"))return;try{mb.setPointerCapture(e.pointerId)}catch(x){}P.set(e.pointerId,e);
+    if(P.size==1)drag={x:e.clientX,y:e.clientY,vx:v.x,vy:v.y,moved:false};
+    else{drag=null;const[a,b]=[...P.values()];pinch={d:Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY)}}});
+  mb.addEventListener("pointermove",e=>{if(!P.has(e.pointerId))return;P.set(e.pointerId,e);
+    if(P.size==2){const[a,b]=[...P.values()],d=Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY);
+      if(pinch&&pinch.d>0&&d>0){const m=toSvg({clientX:(a.clientX+b.clientX)/2,clientY:(a.clientY+b.clientY)/2});zoomAt(pinch.d/d,m[0],m[1])}
+      pinch={d};return}
+    if(!drag)return;const dx=e.clientX-drag.x,dy=e.clientY-drag.y;
+    if(Math.abs(dx)+Math.abs(dy)>6)drag.moved=true;
+    if(drag.moved){v.x=drag.vx-dx*px();v.y=drag.vy-dy*px();apply()}});
+  mb.addEventListener("pointerup",e=>{const had=P.delete(e.pointerId);
+    if(pinch){if(!P.size)pinch=null;drag=null;return}
+    if(!drag||!had)return;const was=drag;drag=null;if(was.moved)return;
+    const[sx,sy]=toSvg(e),lon=Math.max(-180,Math.min(180,sx-180)),lat=Math.max(-90,Math.min(90,90-sy));
+    if(onPick(lon,lat))put(gp,lon,lat)});
+  mb.addEventListener("pointercancel",e=>{P.delete(e.pointerId);drag=null;pinch=null});
+  const put=(el,lon,lat)=>{el.setAttribute("cx",lon+180);el.setAttribute("cy",90-lat);el.setAttribute("visibility","visible")};
+  if("ResizeObserver" in window)new ResizeObserver(apply).observe(mb);
+  return{setView,world:()=>setView(180,90,360),ukraine:()=>setView(211.3,41.4,20),
+    pin:(lon,lat)=>put(gp,lon,lat),target:(lon,lat)=>put(tp,lon,lat),
+    link:(a,b,c,d)=>{ln.setAttribute("x1",a+180);ln.setAttribute("y1",90-b);ln.setAttribute("x2",c+180);ln.setAttribute("y2",90-d);ln.setAttribute("visibility","visible")},
+    river:d=>{hl.setAttribute("d",d);hl.setAttribute("visibility","visible")},
+    terr:(lon,lat,r)=>{if(r>0){tr.setAttribute("cx",lon+180);tr.setAttribute("cy",90-lat);tr.setAttribute("rx",Math.min(180,r/(111.32*Math.max(.05,Math.cos(rad(lat))))));tr.setAttribute("ry",r/110.57);tr.setAttribute("visibility","visible")}else tr.setAttribute("visibility","hidden")},
+    clear:()=>[gp,tp,ln,hl,tr].forEach(x=>x.setAttribute("visibility","hidden"))};
+}
+
+function geoMenu(msg){
+  G.innerHTML=`<h2>Де це?</h2><p class="sub">5 раундів. Чим ближче ваша мітка, тим більше очок. Оберіть режим.</p><div class="themes">`+
+  MODES.map(m=>`<button class="theme" data-m="${m[0]}"><span class="ti">${m[1]}</span><b>${m[2]}</b><span>${m[3]}${m[0]=="m"?` · питань: ${CM.length}`:""} · рекорд: ${store.get("best:geo:"+m[0])}</span></button>`).join("")+`</div>
+  <h2 style="margin-top:26px">Мої питання на карті</h2><p class="sub">Напишіть питання й позначте на карті територію, де відповідь вважається правильною.</p>
+  <div class="mylist">${CM.map((m,i)=>`<div class="mi"><span>📍 <b>${esc(m.n)}</b> · територія ${m.r} км</span><button class="back" data-me="${i}">Редагувати</button></div>`).join("")}</div>
+  <div class="row"><button class="btn" id="mn">＋ Нове питання на карті</button></div>`+fileBar();
+  G.querySelectorAll("[data-m]").forEach(b=>b.onclick=()=>startGeo(b.dataset.m));
+  G.querySelectorAll("[data-me]").forEach(b=>b.onclick=()=>mapEd(+b.dataset.me));
+  gg("#mn").onclick=()=>mapEd(null);
+  bindFile(G,geoMenu);gg(".fm").textContent=msg||"";
+}
+
+function startGeo(mode){
+  if(mode=="m"&&!CM.length)return geoMenu("Спочатку створіть хоча б одне питання на карті.");
+  const pool=mode=="m"?CM.map(m=>({k:"m",n:m.n,c:m.c,x:m.x,y:m.y,r:m.r})):POOL.filter(p=>mode=="ua"?(p.ua||p.only):(!p.only&&(mode=="mix"||p.k==mode)));
+  const rounds=sh(pool).slice(0,5),UAM=mode=="ua";let r=0,total=0,guess=null,done=false;
+  G.innerHTML=`<div class="meta"><span id="gi"></span><span class="score" id="gs"></span></div>
+  <div class="clue"><small id="ck"></small><b id="cl"></b><span class="hint" id="ch"></span></div>${mapBox()}
+  <div class="res" id="rs"></div><div class="row"><button class="btn" id="go" disabled>Вгадати</button></div>`;
+  const go=gg("#go");
+  const M=mapInit((lon,lat)=>{if(done)return false;guess=[lon,lat];go.disabled=false;return true});
+  function round(){
+    const p=rounds[r];guess=null;done=false;M.clear();UAM?M.ukraine():M.world();
+    gg("#gi").textContent=`Раунд ${r+1} з ${rounds.length}`;gg("#gs").textContent=`Очки: ${total}`;
+    gg("#ck").textContent=ASK[p.k];gg("#cl").textContent=p.k=="r"?"Річка "+p.n:p.c;gg("#ch").textContent=p.k=="r"?p.c:"";
+    gg("#rs").innerHTML='<span style="color:var(--mute)">Торкніться карти, щоб поставити мітку. Колесо миші, щипок пальцями або +/− змінюють масштаб, перетягування рухає карту.</span>';
+    go.textContent="Вгадати";go.disabled=true;go.onclick=check;
+  }
+  function check(){
+    const p=rounds[r];let d,at;done=true;
+    if(p.k=="r"){const m=near(guess,RV[p.i][3]);d=m[0];at=m[1];M.river(lineOf(RV[p.i][2]))}
+    else{d=dist(guess[0],guess[1],p.x,p.y);at=[p.x,p.y];if(p.k=="m"&&p.r>0){M.terr(p.x,p.y,p.r);d=Math.max(0,d-p.r)}}
+    const sc=UAM?200:p.k=="r"?600:p.k=="m"?500+p.r:1500,pt=Math.round(5000*Math.exp(-Math.max(0,d-(UAM?5:15))/sc));total+=pt;
+    M.target(at[0],at[1]);M.link(guess[0],guess[1],at[0],at[1]);
+    const km=Math.round(d).toLocaleString("uk");
+    gg("#rs").innerHTML=p.k=="r"?`<b>Річка ${esc(p.n)}</b>: ваша мітка за ${km} км від русла, це ${pt} з 5000 очок.`
+      :`<b>${esc(p.n)}</b>: ${d==0&&p.k=="m"&&p.r?"ви потрапили в потрібну територію":`ви схибили на ${km} км`}, це ${pt} з 5000 очок.`;
+    gg("#gs").textContent=`Очки: ${total}`;
+    go.textContent=r+1<rounds.length?"Далі":"Показати підсумок";go.onclick=()=>{r++;r<rounds.length?round():end()};
+  }
+  function end(){
+    const k="best:geo:"+mode,prev=store.get(k);if(total>prev)store.set(k,total);const max=rounds.length*5000;
+    const m=total>=max*.8?"Ви справжній географ":total>=max*.5?"Добре знаєте карту":total>=max*.25?"Непогано, є куди рости":"Карта поки дається нелегко";
+    G.innerHTML=`<div class="end"><div class="big">${total}</div><h2>${m}</h2><p class="sub">з ${max.toLocaleString("uk")} · рекорд: ${Math.max(prev,total)}</p>
+    <div class="row" style="justify-content:center"><button class="btn" id="ga">Грати ще</button><button class="btn ghost" id="gb">Інший режим</button></div></div>`;
+    gg("#ga").onclick=()=>startGeo(mode);gg("#gb").onclick=()=>geoMenu();
+    if(total>=max*.8)burst(innerWidth/2,innerHeight*.3,26,["🎉","⭐","🌍"]);
+  }
+  round();
+}
+
+function mapEd(i){
+  const s=i!=null?CM[i]:null,ed={n:s?s.n:"",c:s?s.c:"",x:s?s.x:null,y:s?s.y:null,r:s?s.r:100,msg:"",sure:false};
+  draw();
+  function draw(){
+    G.innerHTML=`<section class="stage" style="${cust("#0c8599","📍")}"><div class="sh"><b>📍 ${i!=null?"Редагування питання":"Нове питання на карті"}</b><button class="back" id="bk">← Скасувати</button></div>
+    <div class="f"><label for="mq">Питання або підказка</label><input type="text" id="mq" maxlength="200" value="${esc(ed.c)}" placeholder="Наприклад, де знаходиться наша школа?"></div>
+    <div class="f"><label for="mnm">Назва місця (з'явиться після відповіді)</label><input type="text" id="mnm" maxlength="40" value="${esc(ed.n)}" placeholder="Наприклад, Ужгород"></div>
+    <div class="f"><span>Торкніться карти, щоб позначити правильне місце</span>${mapBox()}</div>
+    <div class="f"><label for="rr">Територія, де відповідь вважається правильною: радіус <b id="rv">${ed.r}</b> км</label><input type="range" id="rr" min="0" max="1500" step="10" value="${ed.r}"></div>
+    <div class="react err" id="em" role="alert">${ed.msg}</div>
+    <div class="row"><button class="btn" id="sv2">Зберегти питання</button>${i!=null?`<button class="btn ghost" id="dl">${ed.sure?"Точно видалити?":"Видалити питання"}</button>`:""}</div></section>`;
+    const M=mapInit((lon,lat)=>{ed.x=lon;ed.y=lat;M.terr(lon,lat,ed.r);return true});
+    if(ed.x!=null){M.pin(ed.x,ed.y);M.terr(ed.x,ed.y,ed.r);M.setView(ed.x+180,90-ed.y,Math.max(20,Math.min(360,ed.r/50)))}else M.world();
+    gg("#mq").oninput=e=>ed.c=e.target.value;gg("#mnm").oninput=e=>ed.n=e.target.value;
+    gg("#rr").oninput=e=>{ed.r=+e.target.value;gg("#rv").textContent=ed.r;if(ed.x!=null)M.terr(ed.x,ed.y,ed.r)};
+    gg("#bk").onclick=()=>geoMenu();
+    gg("#sv2").onclick=()=>{
+      if(!ed.c.trim()){ed.msg="Напишіть питання або підказку.";return draw()}
+      if(ed.x==null){ed.msg="Позначте правильне місце на карті.";return draw()}
+      const o={n:ed.n.trim()||"Місце",c:ed.c.trim(),x:+ed.x.toFixed(3),y:+ed.y.toFixed(3),r:ed.r};
+      if(i!=null)CM[i]=o;else CM.push(o);
+      geoMenu(saveM()?"":"Питання збережено лише до закриття сторінки. Збережіть його у файл.")};
+    if(gg("#dl"))gg("#dl").onclick=()=>{if(!ed.sure){ed.sure=true;draw();return}CM.splice(i,1);saveM();geoMenu()};
+  }
+}
+
+/* ---------- Майстерня на GitHub: пакети лежать у workshop/packs, список збирає GitHub Actions ---------- */
+const S=$("#shop"),ss=s=>S.querySelector(s);
+const REPO=(()=>{const m=document.querySelector('meta[name=repo]');if(m&&m.content&&!/^OWNER\//.test(m.content))return m.content;
+  if(location.hostname.endsWith(".github.io"))return location.hostname.split(".")[0]+"/"+(location.pathname.split("/")[1]||location.hostname);return null})();
+let PK=[],SF={q:"",kind:"all",sort:"new"};
+const hash=s=>[...s].reduce((h,c)=>(h*31+c.charCodeAt(0))>>>0,7).toString(36);
+const okc=c=>/^#[0-9a-f]{6}$/i.test(c)?c:"#1c7ed6";
+const entOf=d=>d&&d.format=="quiz-geo-pack"&&(d.kind=="theme"||d.kind=="map")&&typeof d.title=="string"?{title:d.title,icon:d.icon,color:d.color,kind:d.kind,n:d.kind=="map"?(d.map||[]).length:((d.theme||{}).qs||[]).length,desc:d.desc||"",author:d.author||"",ts:+d.ts||0}:null;
+async function loadIndex(){
+  try{const r=await fetch("workshop/index.json",{cache:"no-cache"});if(r.ok){const j=await r.json();return(j.packs||[]).filter(p=>p&&typeof p.file=="string")}}catch(e){}
+  if(!REPO)throw new Error("index.json не знайдено");
+  const r=await fetch(`https://api.github.com/repos/${REPO}/contents/workshop/packs`);
+  if(!r.ok)throw new Error(`index.json не знайдено, GitHub відповів ${r.status}`);
+  const files=(await r.json()).filter(f=>/\.json$/i.test(f.name)).slice(0,40),out=[];
+  await Promise.all(files.map(async f=>{try{const e=entOf(await(await fetch(f.download_url)).json());if(e)out.push({...e,file:f.name,url:f.download_url})}catch(x){}}));
+  return out;
+}
+async function showShop(msg){
+  S.innerHTML=`<h2>🛠 Майстерня</h2><p class="sub">Теми квізів і питання на карті від спільноти. Опублікований пакет з'являється тут після перевірки на GitHub.</p>
+  <div class="toolbar"><input type="text" id="sq" placeholder="Пошук" value="${esc(SF.q)}" aria-label="Пошук"><select id="sk" aria-label="Тип"><option value="all">Усе</option><option value="theme">Теми квізів</option><option value="map">Питання на карті</option></select><select id="so" aria-label="Сортування"><option value="new">Нові</option><option value="az">За назвою</option></select><button class="btn ghost sm" id="sr">↻ Оновити</button></div>
+  <div class="res fm" role="status"></div><div class="shopgrid" id="pg">Завантаження…</div><div id="pubbox"></div>`;
+  ss("#sk").value=SF.kind;ss("#so").value=SF.sort;ss(".fm").textContent=msg||"";
+  ss("#sq").oninput=e=>{SF.q=e.target.value;grid()};ss("#sk").onchange=e=>{SF.kind=e.target.value;grid()};ss("#so").onchange=e=>{SF.sort=e.target.value;grid()};
+  ss("#sr").onclick=()=>showShop();
+  try{PK=await loadIndex()}
+  catch(e){PK=[];ss("#pg").textContent=`Не вдалося завантажити майстерню (${e.message}). Відкрийте сайт за адресою GitHub Pages і перевірте, що в репозиторії є папка workshop/packs.`;pubForm();return}
+  grid();pubForm();
+}
+function grid(){
+  const g=ss("#pg");if(!g)return;const q=SF.q.trim().toLowerCase();
+  const L=PK.filter(p=>(SF.kind=="all"||p.kind==SF.kind)&&(!q||`${p.title} ${p.desc||""} ${p.author||""}`.toLowerCase().includes(q)));
+  L.sort((a,b)=>SF.sort=="az"?String(a.title).localeCompare(String(b.title),"uk"):(b.ts||0)-(a.ts||0));
+  if(!L.length){g.textContent=PK.length?"Нічого не знайдено.":"Тут поки порожньо. Опублікуйте першу тему!";return}
+  g.innerHTML=L.map((p,i)=>{const au=/^[A-Za-z0-9-]{1,39}$/.test(p.author||"")?p.author:"";
+    return `<article class="pack" style="--c:${okc(p.color)}"><div class="ph">${esc(String(p.icon||"📚").slice(0,8))}</div>
+    <div class="pb"><b>${esc(String(p.title||"Без назви").slice(0,40))}</b><small>${p.kind=="map"?"Питання на карті":"Тема квізу"} · ${+p.n||0} пит.${au?` · <a href="https://github.com/${au}" target="_blank" rel="noopener noreferrer">@${au}</a>`:""}</small><p>${esc(String(p.desc||"").slice(0,120))}</p></div>
+    <div class="pa"><button class="btn sm" data-a="${i}">＋ Додати до моїх</button></div></article>`}).join("");
+  g.onclick=async e=>{const b=e.target.closest("[data-a]");if(!b||b.disabled)return;const p=L[+b.dataset.a];b.disabled=true;
+    try{const r=await fetch(p.url||"workshop/packs/"+encodeURIComponent(p.file));if(!r.ok)throw 0;addPack(await r.json())}
+    catch(er){ss(".fm").textContent="Не вдалося завантажити пакет."}
+    b.disabled=false};
+}
+function addPack(d){
+  let o;
+  if(d.kind=="theme"&&d.theme){const t={...d.theme};let nm=String(t.name||"Тема").slice(0,30),i=2;const base=nm;while(C.some(c=>c.name==nm))nm=`${base} (${i++})`;t.name=nm;o={themes:[t]}}
+  else o={map:d.map};
+  ss(".fm").textContent=importData(JSON.stringify(o))+" Знайдете їх у «Квізі» або «Де це?».";
+}
+function pubForm(){
+  const b=ss("#pubbox");if(!b)return;
+  const opts=[...C.map((t,i)=>`<option value="t:${i}">Тема: ${esc(t.name)} (${t.qs.length})</option>`),...(CM.length?[`<option value="m">Мої питання на карті (${CM.length})</option>`]:[])];
+  b.innerHTML='<h2 style="margin-top:24px">Опублікувати своє</h2>'+(opts.length?`<p class="sub">Сайт підготує файл, а ви надішлете його на GitHub: після перевірки пакет з'явиться в майстерні.</p>
+  <div class="pubf"><select id="pt" aria-label="Що публікувати">${opts.join("")}</select><input type="text" id="ptl" maxlength="40" placeholder="Назва в майстерні"><input type="text" id="pd" maxlength="120" placeholder="Короткий опис"><input type="text" id="pa" maxlength="39" placeholder="Ваш нік на GitHub (необов'язково)"><button class="btn" id="pp">Підготувати файл</button></div><div class="fx"></div><div id="steps"></div>`
+  :'<p class="sub">Спочатку створіть власну тему в «Квізі» або питання на карті в «Де це?».</p>');
+  if(!opts.length)return;
+  const sync=()=>{const v=ss("#pt").value;ss("#ptl").value=v=="m"?"Питання на карті":C[+v.slice(2)].name};
+  ss("#pt").onchange=sync;sync();
+  try{ss("#pa").value=localStorage.getItem("ghUser")||""}catch(e){}
+  ss("#pp").onclick=async()=>{
+    const v=ss("#pt").value,title=(ss("#ptl").value.trim()||"Без назви").slice(0,40),desc=ss("#pd").value.trim().slice(0,120),au=ss("#pa").value.trim();
+    if(au&&!/^[A-Za-z0-9-]{1,39}$/.test(au)){ss(".fm").textContent="Нік GitHub: лише латинські літери, цифри й дефіс.";return}
+    try{localStorage.setItem("ghUser",au)}catch(e){}
+    let pack=v=="m"?{kind:"map",icon:"📍",color:"#0c8599",n:CM.length,map:CM}:(t=>({kind:"theme",icon:t.icon,color:t.color,n:t.qs.length,theme:t}))(C[+v.slice(2)]);
+    pack={format:"quiz-geo-pack",v:1,...pack,title,desc,...(au?{author:au}:{}),ts:Date.now()};
+    const sz=o=>new Blob([JSON.stringify(o)]).size;let note="";
+    if(sz(pack)>600000){if(pack.kind=="theme"){pack.theme={...pack.theme,qs:pack.theme.qs.map(q=>({q:q.q,o:q.o}))};note=" Малюнки не включено: пакет був завеликий."}
+      if(sz(pack)>600000){ss(".fm").textContent="Пакет завеликий для майстерні.";return}}
+    const fn=`${(title.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")||"pack").slice(0,40)}-${hash(title+Date.now())}.json`;
+    const m=await saveFile(fn,JSON.stringify(pack,null,1),ss(".fx"));
+    ss(".fm").textContent=(m||"")+note;
+    const json=JSON.stringify(pack),enc=encodeURIComponent(json),base=REPO?`https://github.com/${REPO}/new/main/workshop/packs?filename=${encodeURIComponent(fn)}`:"",direct=base&&enc.length<6000;
+    ss("#steps").innerHTML=`<ol class="steps"><li>Файл <b>${esc(fn)}</b> збережено на вашому пристрої (про всяк випадок).</li>
+    <li>${!base?"Відкрийте репозиторій сайту на GitHub: Add file → Create new file у папці workshop/packs.":direct?`Натисніть <a href="${base}&value=${enc}" target="_blank" rel="noopener noreferrer">«Відкрити на GitHub»</a>: назва й вміст файлу вже заповнені.`:`<button class="btn ghost sm" id="cp">Скопіювати вміст файлу</button> і відкрийте <a href="${base}" target="_blank" rel="noopener noreferrer">GitHub</a>, вставте вміст у поле редактора.`}</li>
+    <li>Унизу натисніть «Commit changes…», потім «Propose changes» і «Create pull request». GitHub сам створить вашу копію репозиторію.</li><li>Власник репозиторію перевіряє пакет, і після схвалення він з'являється тут.</li></ol>`;
+    const cp=ss("#cp");if(cp)cp.onclick=async()=>{const t=JSON.stringify(pack,null,1);try{await navigator.clipboard.writeText(t);ss(".fm").textContent="Вміст скопійовано."}catch(e){ss(".fx").innerHTML=`<div class="f"><label>Скопіюйте цей текст:</label><textarea rows="5" readonly>${esc(t)}</textarea></div>`}};
+  };
+}
+
+/* ---------- Вкладки і вигляд сайту ---------- */
+function tab(t){
+  [["q","#quiz","#tq"],["g","#geo","#tg"],["w","#shop","#tw"]].forEach(([k,m,b])=>{$(m).hidden=k!=t;$(b).classList.toggle("on",k==t)});
+  if(t=="q"&&Q.querySelector(".themes"))themes();
+  if(t=="g"&&(!G.innerHTML.trim()||G.querySelector(".themes")))geoMenu();
+  if(t=="w")showShop();
+}
+$("#tq").onclick=()=>tab("q");$("#tg").onclick=()=>tab("g");$("#tw").onclick=()=>tab("w");
+
+const BG=[["auto","Авто"],["sky","Блакитний"],["sunset","Захід"],["mint","М'ята"],["paper","Зошит"],["bliss","Пагорби"],["night","Ніч"]];
+let SET={skin:"modern",bg:"auto"};try{Object.assign(SET,JSON.parse(localStorage.getItem("siteSet")||"{}"))}catch(e){}
+function applySet(){const h=document.documentElement;h.dataset.skin=SET.skin;h.dataset.bg=SET.bg;try{localStorage.setItem("siteSet",JSON.stringify(SET))}catch(e){}}
+function drawOpts(){
+  const o=$("#opts");
+  o.innerHTML=`<div class="f"><span>Стиль сайту</span><div class="pick">${[["modern","Сучасний"],["xp","Windows XP"]].map(s=>`<button class="pk ${SET.skin==s[0]?"on":""}" data-s="${s[0]}">${s[1]}</button>`).join("")}</div></div>
+  <div class="f"><span>Фон сайту (діє в усіх квізах)</span><div class="pick">${BG.map(b=>`<button class="pk ${SET.bg==b[0]?"on":""}" data-b="${b[0]}"><i class="sw2" style="background:${b[0]=="auto"?"linear-gradient(90deg,#e9f1f4 50%,#0d1b28 50%)":`var(--pg-${b[0]})`}"></i>${b[1]}</button>`).join("")}</div></div>`;
+  o.querySelectorAll("[data-s]").forEach(b=>b.onclick=()=>{SET.skin=b.dataset.s;if(SET.skin=="xp"&&SET.bg=="auto")SET.bg="bliss";applySet();drawOpts()});
+  o.querySelectorAll("[data-b]").forEach(b=>b.onclick=()=>{SET.bg=b.dataset.b;applySet();drawOpts()});
+}
+// ---------- Excel/CSV Import/Export Helpers ----------
+function parseCSV(text){
+  const lines=text.trim().split(/\r?\n/);
+  if(lines.length<2)return {themes:[],map:[]};
+  const firstLine=lines[0];
+  const SEP=firstLine.includes(";")?";":",";
+  const headers=firstLine.split(SEP).map(h=>h.trim().replace(/^"|"$/g,""));
+  const rows=lines.slice(1).map(l=>l.split(SEP).map(v=>v.trim().replace(/^"|"$/g,"")));
+  const isMap=headers.includes("x")&&headers.includes("y")||headers[0]=="map";
+  if(isMap){
+    const get=(r,h,i)=>r[headers.indexOf(h)]||(i!==undefined?r[i]:"");
+    return {map:rows.map(r=>({n:get(r,"name")||get(r,"n")||"",c:get(r,"clue")||get(r,"c")||"",x:parseFloat(get(r,"x"))||0,y:parseFloat(get(r,"y"))||0,r:parseInt(get(r,"radius"))||parseInt(get(r,"r"))||100}))};
+  }
+  const themes={};
+  const get=(r,h)=>r[headers.indexOf(h)]||"";
+  rows.forEach(r=>{
+    // Theme name is in "name" column (no separate "theme" column)
+    const themeName=get(r,"name")||"Імпортована тема";
+    if(!themes[themeName])themes[themeName]={name:themeName,icon:get(r,"icon")||"📚",color:get(r,"color")||"#1c7ed6",qs:[]};
+    const q=get(r,"question")||get(r,"q");
+    if(q){
+      const correct=get(r,"correct"), w1=get(r,"wrong1"), w2=get(r,"wrong2"), w3=get(r,"wrong3");
+      const opts=[correct,w1,w2,w3].filter(Boolean);
+      if(opts.length>=2)themes[themeName].qs.push({q,o:opts,img:get(r,"image")||get(r,"img")});
+    }
+  });
+  return {themes:Object.values(themes)};
+}function parseXLSX(arrayBuffer){
+  const wb=XLSX.read(arrayBuffer,{type:"array"});
+  const ws=wb.Sheets[wb.SheetNames[0]];
+  const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:""});
+  if(rows.length<2)return {themes:[],map:[]};
+  const headers=rows[0].map(h=>String(h).trim());
+  const data=rows.slice(1).map(r=>headers.reduce((o,h,i)=>(o[h]=String(r[i]||"").trim(),o),{}));
+  // Convert to CSV-like format and reuse parseCSV logic
+  const csvText=[headers.join(","),...data.map(r=>headers.map(h=>r[h]||"").join(","))].join("\n");
+  return parseCSV(csvText);
+}
+function exportToXLSX(data){
+  const wb=XLSX.utils.book_new();
+  // Themes sheet
+  if(data.themes&&data.themes.length){
+    const themeRows=[["theme","name","icon","color","q","o1","o2","o3","o4","img"]];
+    data.themes.forEach(t=>{
+      (t.qs||[]).forEach(q=>{
+        themeRows.push(["theme",t.name,t.icon||"📚",t.color||"#1c7ed6",q.q,...(q.o||[]).slice(0,4),q.img||""]);
+      });
+    });
+    const ws=XLSX.utils.aoa_to_sheet(themeRows);
+    XLSX.utils.book_append_sheet(wb,ws,"Themes");
+  }
+  // Map sheet
+  if(data.map&&data.map.length){
+    const mapRows=[["kind","n","c","x","y","r"]];
+    data.map.forEach(m=>{
+      mapRows.push(["map",m.n,m.c,m.x,m.y,m.r]);
+    });
+    const ws=XLSX.utils.aoa_to_sheet(mapRows);
+    XLSX.utils.book_append_sheet(wb,ws,"Map");
+  }
+  return wb;
+}
+function exportToCSV(data){
+  const lines=[], SEP=";";
+  if(data.themes&&data.themes.length){
+    // No image column - base64 too long for CSV
+    lines.push(["name","icon","color","question","correct","wrong1","wrong2","wrong3"].join(SEP));
+    data.themes.forEach(t=>{
+      (t.qs||[]).forEach(q=>{
+        const opts=q.o||[]; const correct=opts[0]||""; const wrongs=opts.slice(1,4);
+        lines.push([t.name,t.icon||"📚",t.color||"#1c7ed6",q.q,correct,wrongs[0]||"",wrongs[1]||"",wrongs[2]||""].map(v=>`"${String(v).replace(/"/g,'""')}"`).join(SEP));
+      });
+    });
+  }
+  if(data.map&&data.map.length){
+    if(lines.length)lines.push("");
+    lines.push(["map","name","clue","x","y","radius"].join(SEP));
+    data.map.forEach(m=>lines.push(["map",m.n,m.c,m.x,m.y,m.r].map(v=>`"${String(v).replace(/"/g,'""')}"`).join(SEP)));
+  }
+  return "\uFEFF" + lines.join("\n");
+}function importData(t, fmt){
+  // fmt: "json", "csv", "xlsx" - auto-detect if not provided
+  if(!fmt){
+    if(typeof t==="string"){
+      if(t.trim().startsWith("{") || t.trim().startsWith("[")) fmt="json";
+      else if(t.includes(",") && t.includes("\n")) fmt="csv";
+      else fmt="json";
+    }else if(t instanceof ArrayBuffer){
+      fmt="xlsx";
+    }
+  }
+  let d;
+  if(fmt==="json"){
+    try{d=JSON.parse(t)}catch(e){return "Це не схоже на JSON файл із запитаннями."}
+  }else if(fmt==="csv"){
+    try{d=parseCSV(t)}catch(e){return "Помилка парсингу CSV: "+e.message}
+  }else if(fmt==="xlsx"){
+    try{d=parseXLSX(t)}catch(e){return "Помилка парсингу XLSX: "+e.message}
+  }
+  let nt=0,nm=0;
+  (d.themes||[]).forEach(x=>{
+    const qs=(x.qs||[]).map(q=>Array.isArray(q)?{q:q[0],o:q.slice(1)}:q).filter(q=>q&&q.q&&Array.isArray(q.o)&&q.o.length>1)
+      .map(q=>({q:clean(q.q),o:q.o.slice(0,4).map(clean),...(typeof q.img=="string"&&q.img.startsWith("data:image/")?{img:q.img}:{})}));
+    if(!x.name||!qs.length)return;
+    const t={name:clean(x.name).slice(0,30),icon:clean(x.icon||"📚").slice(0,8),color:/^#[0-9a-f]{6}$/i.test(x.color)?x.color:COL[3],qs};
+    const i=C.findIndex(c=>c.name==t.name);if(i>=0)C[i]=t;else C.push(t);nt++});
+  (d.map||[]).forEach(m=>{
+    if(!m||!m.n||typeof m.x!="number"||typeof m.y!="number")return;
+    const t={n:clean(m.n).slice(0,40),c:clean(m.c),x:Math.max(-180,Math.min(180,m.x)),y:Math.max(-90,Math.min(90,m.y)),r:Math.max(0,Math.min(1500,+m.r||0))};
+    const i=CM.findIndex(c=>c.n==t.n);if(i>=0)CM[i]=t;else CM.push(t);nm++});
+  if(!nt&&!nm)return "У файлі не знайдено запитань.";
+  saveC();saveM();return `Завантажено: тем — ${nt}, питань на карті — ${nm}.`;
+}
+function bindFile(root,after){
+  const fm=root.querySelector(".fm"),fx=root.querySelector(".fx");
+  // JSON export
+  root.querySelector("[data-f=out]").onclick=async()=>{
+    if(!C.length&&!CM.length){fm.textContent="Спочатку створіть власну тему або питання на карті.";return}
+    const m=await saveFile("my-quiz-questions.json",JSON.stringify({app:"quiz-geo",v:1,themes:C,map:CM}),fx);fm.textContent=m};
+  // XLSX export
+  root.querySelector("[data-f=out-xlsx]").onclick=async()=>{
+    if(!C.length&&!CM.length){fm.textContent="Спочатку створіть власну тему або питання на карті.";return}
+    const wb=exportToXLSX({themes:C,map:CM});
+    const buf=XLSX.write(wb,{type:"array",bookType:"xlsx"});
+    await saveFile("my-quiz-questions.xlsx",buf,fx);fm.textContent="Excel файл збережено."};
+  // CSV export
+  root.querySelector("[data-f=out-csv]").onclick=async()=>{
+    if(!C.length&&!CM.length){fm.textContent="Спочатку створіть власну тему або питання на карті.";return}
+    const csv=exportToCSV({themes:C,map:CM});
+    await saveFile("my-quiz-questions.csv",csv,fx);fm.textContent="CSV файл збережено."};
+  // Import handler
+  root.querySelector("[data-f=in]").onchange=e=>{
+    const f=e.target.files[0];if(!f)return;
+    const r=new FileReader();
+    const ext=f.name.toLowerCase().split(".").pop();
+    if(ext==="xlsx"){r.onload=()=>after(importData(r.result,"xlsx"));r.readAsArrayBuffer(f);}
+    else if(ext==="csv"){r.onload=()=>after(importData(r.result,"csv"));r.readAsText(f);}
+    else{r.onload=()=>after(importData(r.result,"json"));r.readAsText(f);}
+    r.onerror=()=>{fm.textContent="Не вдалося прочитати файл."};}
+}
+
+
+const togOpts=()=>{const o=$("#opts");o.hidden=!o.hidden;if(!o.hidden){drawOpts();o.scrollIntoView({block:"nearest"})}};
+$("#op").onclick=togOpts;$("#st").onclick=togOpts;
+const clk=()=>{$("#clk").textContent=new Date().toLocaleTimeString("uk",{hour:"2-digit",minute:"2-digit"})};clk();setInterval(clk,20000);
+applySet();
+</script>
+
+</body>
+</html>
