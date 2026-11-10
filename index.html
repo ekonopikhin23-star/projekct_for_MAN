@@ -5,6 +5,127 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="repo" content="OWNER/REPO">
 <title>Квіз і карта</title>
+<script type="module">
+import { initAuth, onAuthChange, getCurrentUser } from './auth-ui.js';
+import { packsApi } from './supabase-client.js';
+
+await initAuth();
+
+onAuthChange((user) => {
+  if (document.getElementById('shop').hidden === false) refreshShopUI();
+});
+
+// Нова showShop — вставте ЦЕЙ КОД замість старої функції showShop у вашому index.html
+window.showShop = async function showShop(msg) {
+  const S = document.getElementById('shop');
+  const user = getCurrentUser();
+
+  S.innerHTML = `
+    <h2>🛠 Майстерня</h2>
+    <p class="sub">Теми квізів і питання на карті від спільноти. Опублікуйте свій пакет — він потрапить на модерацію.</p>
+    ${user ? `
+      <div class="toolbar" style="margin-bottom:16px">
+        <button class="btn" id="btn-create-pack">＋ Створити пакет</button>
+        <button class="btn ghost sm" id="btn-my-packs">Мої пакети</button>
+      </div>` : `
+      <p class="sub" style="margin-bottom:16px"><button class="btn ghost sm" id="btn-login-shop">Увійдіть</button>, щоб публікувати пакети.</p>
+    `}
+    <div class="toolbar">
+      <input type="text" id="sq" placeholder="Пошук" aria-label="Пошук">
+      <select id="sk" aria-label="Тип"><option value="all">Усе</option><option value="theme">Теми квізів</option><option value="map">Питання на карті</option></select>
+      <select id="so" aria-label="Сортування"><option value="new">Нові</option><option value="az">За назвою</option><option value="popular">Популярні</option></select>
+    </div>
+    <div class="res fm" role="status">${msg ? escapeHtml(msg) : ''}</div>
+    <div class="shopgrid" id="pg">Завантаження…</div>
+    <div id="pubbox"></div>`;
+
+  S.querySelector('#sq')?.addEventListener('input', debounce(() => renderGrid(), 300));
+  S.querySelector('#sk')?.addEventListener('change', () => renderGrid());
+  S.querySelector('#so')?.addEventListener('change', () => renderGrid());
+  S.querySelector('#btn-create-pack')?.addEventListener('click', showCreatePackForm);
+  S.querySelector('#btn-my-packs')?.addEventListener('click', showMyPacks);
+  S.querySelector('#btn-login-shop')?.addEventListener('click', () => import('./auth-ui.js').then(m => m.showAuthModal('login')));
+
+  await renderGrid();
+};
+
+let currentFilters = { kind: 'all', sort: 'new', search: '' };
+let allPacksCache = [];
+
+async function renderGrid() {
+  const pg = document.getElementById('pg'), fm = document.querySelector('#shop .fm');
+  currentFilters.search = document.getElementById('sq')?.value.trim().toLowerCase() || '';
+  currentFilters.kind = document.getElementById('sk')?.value || 'all';
+  currentFilters.sort = document.getElementById('so')?.value || 'new';
+  pg.innerHTML = 'Завантаження…';
+  try {
+    const { packs, total } = await packsApi.getApproved({ kind: currentFilters.kind, search: currentFilters.search, sort: currentFilters.sort, limit: 50 });
+    allPacksCache = packs;
+    fm.textContent = `Знайдено: ${total} пакет${total===1?'':total<5?'и':'ів'}`;
+    renderPacks(packs);
+  } catch (e) { pg.textContent = `Помилка: ${e.message}`; }
+}
+
+async function renderPacks(packs) {
+  const pg = document.getElementById('pg');
+  if (!packs.length) { pg.textContent = 'Тут поки порожньо. Будьте першим!'; return; }
+  const user = getCurrentUser();
+  const likedSet = user ? await packsApi.getLikesForPacks(packs.map(p => p.id)) : new Set();
+  pg.innerHTML = packs.map(p => {
+    const isLiked = likedSet.has(p.id);
+    const authorLink = p.profiles?.github_login ? `<a href="https://github.com/${p.profiles.github_login}" target="_blank" rel="noopener">@${p.profiles.github_login}</a>` : (p.profiles?.username || 'Анонім');
+    return `<article class="pack" style="--c:${p.color}"><div class="ph">${escapeHtml(String(p.icon||'📦').slice(0,8))}</div>
+      <div class="pb"><b>${escapeHtml(p.title)}</b><small>${p.kind==='map'?'Питання на карті':'Тема квізу'} · ${p.question_count} пит. · ${authorLink}</small>
+      <p>${escapeHtml(p.description||'').slice(0,120)}</p></div>
+      <div class="pa"><button class="btn sm ${isLiked?'liked':''}" data-like="${p.id}" title="${isLiked?'Прибрати лайк':'Лайк'}">${isLiked?'❤️':'🤍'} <span class="like-count">${p.likes||0}</span></button>
+      <button class="btn ghost sm" data-add="${p.id}">＋ Додати</button></div></article>`;
+  }).join('');
+  pg.querySelectorAll('[data-like]').forEach(btn => { btn.onclick = async () => { const packId=btn.dataset.like; btn.disabled=true; try{const {liked}=await packsApi.toggleLike(packId); const ce=btn.querySelector('.like-count'); ce.textContent=+ce.textContent+(liked?1:-1); btn.classList.toggle('liked',liked); btn.innerHTML=`${liked?'❤️':'🤍'} <span class="like-count">${ce.textContent}</span>`;}catch(e){alert(e.message)} btn.disabled=false; }; });
+  pg.querySelectorAll('[data-add]').forEach(btn => { btn.onclick = async () => { const pack=allPacksCache.find(p=>p.id===btn.dataset.add); if(!pack)return; btn.disabled=true; try{const data={format:'quiz-geo-pack',v:1,kind:pack.kind,...(pack.kind==='theme'?{theme:pack.data}:{map:pack.data})}; alert(importData(JSON.stringify(data))+' Знайдете у «Квізи» або «Де це?».');}catch(e){alert('Помилка: '+e.message)} btn.disabled=false; }; });
+}
+
+function showCreatePackForm() {
+  const S=document.getElementById('shop');
+  S.innerHTML=`<h2>🛠 Майстерня</h2><div class="stage" style="max-width:560px"><h3>Новий пакет</h3>
+    <div class="f"><label>Тип <select id="pk-kind"><option value="theme">Тема квізу</option><option value="map">Питання на карті</option></select></label>
+    <label>Назва в майстерні <input type="text" id="pk-title" maxlength="40" required></label>
+    <label>Іконка <input type="text" id="pk-icon" maxlength="8" value="📦"></label>
+    <label>Колір <input type="color" id="pk-color" value="#1c7ed6"></label>
+    <label>Опис <textarea id="pk-desc" maxlength="120" rows="2"></textarea></label></div>
+    <div id="pk-content"></div><div class="row"><button class="btn" id="pk-submit">Надіслати на модерацію</button><button class="btn ghost" id="pk-cancel">Скасувати</button></div><p class="fm" id="pk-msg"></p></div>`;
+  document.getElementById('pk-kind').onchange=renderPackContent; renderPackContent();
+  document.getElementById('pk-submit').onclick=submitPack; document.getElementById('pk-cancel').onclick=()=>showShop();
+}
+
+function renderPackContent() {
+  const kind=document.getElementById('pk-kind').value, cd=document.getElementById('pk-content');
+  if(kind==='theme'){ const themes=JSON.parse(localStorage.getItem('quizThemes')||'[]'); if(!themes.length){cd.innerHTML='<p class="sub err">Немає тем. Створіть тему у вкладці «Квіз».</p>';return} cd.innerHTML=`<label>Оберіть тему: <select id="pk-theme">${themes.map((t,i)=>`<option value="${i}">${escapeHtml(t.name)} (${t.qs.length} пит.)</option>`).join('')}</select></label>`; }
+  else{ const mapQs=JSON.parse(localStorage.getItem('geoMap')||'[]'); if(!mapQs.length){cd.innerHTML='<p class="sub err">Немає питань на карті. Додайте їх у вкладці «Де це?».</p>';return} cd.innerHTML=`<p class="sub">Буде опубліковано ${mapQs.length} питань з вашої карти.</p>`; }
+}
+
+async function submitPack() {
+  const msgEl=document.getElementById('pk-msg'), kind=document.getElementById('pk-kind').value, title=document.getElementById('pk-title').value.trim();
+  const icon=document.getElementById('pk-icon').value.slice(0,8)||'📦', color=document.getElementById('pk-color').value, desc=document.getElementById('pk-desc').value.trim();
+  if(!title){msgEl.textContent='Введіть назву';msgEl.style.color='var(--bad)';return}
+  let data; if(kind==='theme'){const themes=JSON.parse(localStorage.getItem('quizThemes')||'[]'); const t=themes[+document.getElementById('pk-theme').value]; data={format:'quiz-geo-pack',v:1,kind:'theme',theme:t};} else {const map=JSON.parse(localStorage.getItem('geoMap')||'[]'); data={format:'quiz-geo-pack',v:1,kind:'map',map};}
+  msgEl.textContent='Відправка…';msgEl.style.color='var(--mute)';
+  try{const pack=await packsApi.create({kind,title,icon,color,description:desc,data,question_count:kind==='theme'?data.theme.qs.length:data.map.length}); msgEl.textContent=`Пакет "${pack.title}" надіслано на модерацію!`; msgEl.style.color='var(--ok)'; setTimeout(()=>showShop(),2000);} catch(e){msgEl.textContent=e.message;msgEl.style.color='var(--bad)';}
+}
+
+async function showMyPacks() {
+  const user=getCurrentUser(); if(!user)return; const packs=await packsApi.getMine(); const S=document.getElementById('shop');
+  S.innerHTML=`<h2>🛠 Майстерня</h2><div class="toolbar"><button class="btn ghost sm" id="back-shop">← Назад</button></div><div class="shopgrid" id="my-packs">${packs.length?packs.map(renderMyPackCard).join(''):'<p class="sub">У вас ще немає пакетів.</p>'}</div>`;
+  document.getElementById('back-shop').onclick=()=>showShop();
+  packs.forEach(p=>{const card=document.querySelector(`[data-mypack="${p.id}"]`); card?.querySelector('.edit')?.addEventListener('click',()=>editMyPack(p)); card?.querySelector('.delete')?.addEventListener('click',()=>deleteMyPack(p.id));});
+}
+
+function renderMyPackCard(p){const sl={pending:'🟡 На модерації',approved:'🟢 Схвалено',rejected:'🔴 Відхилено'}[p.status]; return `<article class="pack" data-mypack="${p.id}" style="--c:${p.color}"><div class="ph">${escapeHtml(String(p.icon||'📦').slice(0,8))}</div><div class="pb"><b>${escapeHtml(p.title)}</b><small>${p.kind==='map'?'Карта':'Квіз'} · ${p.question_count} пит. · ${sl}</small>${p.rejection_reason?`<p class="err" style="margin-top:4px">Причина: ${escapeHtml(p.rejection_reason)}</p>`:''}<p>${escapeHtml(p.description||'').slice(0,120)}</p></div><div class="pa">${p.status!=='approved'?`<button class="btn ghost sm edit">✏️ Редагувати</button>`:''}<button class="btn ghost sm delete">🗑 Видалити</button></div></article>`;}
+async function editMyPack(pack){if(confirm('Відкрити форму для редагування? Поточний пакет буде видалено.')){await packsApi.delete(pack.id); showCreatePackForm();}}
+async function deleteMyPack(id){if(confirm('Видалити цей пакет?')){await packsApi.delete(id); showMyPacks();}}
+
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function debounce(fn,ms){let t;return(...a)=>{clearTimeout(t);t=setTimeout(()=>fn(...a),ms);};}
+</script>
 <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
 <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
 <style>:root{
