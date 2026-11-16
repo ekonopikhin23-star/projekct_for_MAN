@@ -1,0 +1,15 @@
+{
+ "packs": [
+  {
+   "file": "pack-1x7ioiv.json",
+   "title": "перевірка",
+   "icon": "📚",
+   "color": "#1c7ed6",
+   "kind": "theme",
+   "n": 3,
+   "desc": "",
+   "author": "",
+   "ts": 1792003921292
+  }
+ ]
+}
