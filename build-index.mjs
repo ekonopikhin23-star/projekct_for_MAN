@@ -1,5 +1,6 @@
 // Перевіряє пакети в workshop/packs і збирає workshop/index.json.
-// Запуск: node scripts/build-index.mjs [--check]
+// Запуск з кореня проєкту: node build-index.mjs [--check]
+// У папці workshop/packs мають лежати лише файли пакетів (без index.json).
 import {readdirSync,readFileSync,writeFileSync} from "node:fs";
 const check=process.argv.includes("--check"),dir="workshop/packs",errs=[],out=[];
 const str=(s,n)=>typeof s=="string"&&s.length>0&&s.length<=n;
