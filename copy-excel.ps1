@@ -2,7 +2,7 @@
  # Запуск: powershell -ExecutionPolicy Bypass -File copy-excel.ps1
  
  $downloads = "$env:USERPROFILE\Downloads"
- $project   = "C:\tmp\ekonopikhin23-star.github.io"
+ $project   = $PSScriptRoot   # папка, де лежить цей скрипт (корінь проєкту)
  $patterns  = @("my-quiz-questions*.xlsx", "my-quiz-questions*.csv", "my-quiz-questions*.json", "quiz-export*.xlsx")
  
  Write-Host "🔍 Перевіряю $downloads ..." -ForegroundColor Cyan
