@@ -8,7 +8,7 @@
 
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 
-<meta name="repo" content="OWNER/REPO">
+<meta name="repo" content="ekonopikhin23-star/projekct_for_man">
 
 <title>Квіз і карта</title>
 
@@ -698,7 +698,7 @@ function startQuiz(t){
 
 
 
-const parse=t=>t.split(/\r?\n/).map(l=>{const d=l.includes("\t")?"\t":l.includes(";")?";":",";let inQuotes=false,cur="",res=[];for(let i=0;i<l.length;i++){const c=l[i];if(c==="""&&(i===0||l[i-1]!=="\\")){inQuotes=!inQuotes}else if(c===d&&!inQuotes){res.push(cur.trim().replace(/^"|"$/g,""));cur=""}else cur+=c}res.push(cur.trim().replace(/^"|"$/g,""));return res})
+const parse=t=>t.split(/\r?\n/).map(l=>{const d=l.includes("\t")?"\t":l.includes(";")?";":",";let inQuotes=false,cur="",res=[];for(let i=0;i<l.length;i++){const c=l[i];if(c==='"'&&(i===0||l[i-1]!=="\\")){inQuotes=!inQuotes}else if(c===d&&!inQuotes){res.push(cur.trim().replace(/^"|"$/g,""));cur=""}else cur+=c}res.push(cur.trim().replace(/^"|"$/g,""));return res})
 
   .filter(r=>r.length>1&&r[0]).filter((r,i)=>!(i==0&&/^питання$/i.test(r[0]))).map(r=>[r[0],r[1]||"",r[2]||"",r[3]||"",r[4]||"",""]);
 
