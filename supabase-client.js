@@ -12,12 +12,16 @@ export const packsApi = {
   async getApproved({ kind, search, sort = 'new', limit = 50, offset = 0 } = {}) {
     let query = supabase
       .from('packs')
-      .select(\*, profiles:author_id (username, github_login, avatar_url)\, { count: 'exact' })
+      .select(`*, profiles:author_id (username, github_login, avatar_url)`, { count: 'exact' })
       .eq('status', 'approved')
       .order(sort === 'az' ? 'title' : 'created_at', { ascending: sort === 'az' })
       .range(offset, offset + limit - 1);
     if (kind && kind !== 'all') query = query.eq('kind', kind);
-    if (search) query = query.ilike('title', \%\%\);
+    if (search) {
+      // екрануємо символи-шаблони LIKE, щоб пошук шукав саме введений текст
+      const term = search.replace(/[%_\\]/g, '\\$&');
+      query = query.ilike('title', `%${term}%`);
+    }
     const { data, error, count } = await query;
     if (error) throw error;
     return { packs: data || [], total: count };
@@ -116,7 +120,8 @@ export const authApi = {
   async signInWithOAuth(provider) {
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider,
-      options: { redirectTo: \\/auth-callback.html\ }
+      // повертаємо користувача на ту саму сторінку (папку сайту), файлу auth-callback.html у проєкті немає
+      options: { redirectTo: new URL('./', window.location.href).href }
     });
     if (error) throw error;
     return data;
@@ -165,7 +170,7 @@ export const adminApi = {
   async getPending(limit = 100) {
     const { data, error } = await supabase
       .from('packs')
-      .select(\*, profiles:author_id (username, github_login, avatar_url)\)
+      .select(`*, profiles:author_id (username, github_login, avatar_url)`)
       .eq('status', 'pending')
       .order('created_at', { ascending: true })
       .limit(limit);
