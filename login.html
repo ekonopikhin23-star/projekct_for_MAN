@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Вхід — Квіз і карта</title>
+<style>
+:root{--bg:#e9f1f4;--card:#fff;--ink:#12263a;--mute:#5b6f80;--line:#c6d6df;--acc:#2447d6;--acc-ink:#fff;--ok:#16895a;--bad:#c93a52}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1b28;--card:#152838;--ink:#e6eef3;--mute:#8ea4b5;--line:#2a4256;--acc:#6f8cff;--acc-ink:#0d1b28;--ok:#3fc08a;--bad:#ff7088}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px;background:var(--bg);color:var(--ink);font:16px/1.5 "Segoe UI",system-ui,-apple-system,Roboto,sans-serif}
+.card{width:100%;max-width:420px;background:var(--card);border:2px solid var(--ink);border-radius:18px;padding:24px;box-shadow:5px 5px 0 var(--ink)}
+h1{margin:0 0 16px;font-size:26px;text-align:center}
+.tabs{display:flex;gap:8px;margin-bottom:16px}
+.tab{flex:1;padding:10px;border:2px solid var(--ink);border-radius:12px;background:none;color:var(--ink);font:inherit;font-weight:700;cursor:pointer}
+.tab[aria-selected="true"]{background:var(--acc);color:var(--acc-ink)}
+label{display:block;margin-bottom:12px;font-weight:600}
+input{display:block;width:100%;margin-top:4px;padding:11px 12px;border:2px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);font:inherit}
+input:focus{outline:3px solid var(--acc);outline-offset:1px;border-color:var(--acc)}
+.btn{display:block;width:100%;text-align:center;text-decoration:none;border-radius:12px;padding:12px 18px;font:inherit;font-weight:700;border:2px solid var(--ink);background:var(--acc);color:var(--acc-ink);cursor:pointer}
+.btn.ghost{background:none;color:var(--ink)}
+.btn:disabled{opacity:.6;cursor:wait}
+.btn:focus-visible,.tab:focus-visible,a:focus-visible{outline:3px solid var(--acc);outline-offset:3px}
+.or{display:flex;align-items:center;gap:10px;margin:16px 0;color:var(--mute);font-size:14px}
+.or::before,.or::after{content:"";flex:1;height:1px;background:var(--line)}
+.oauth{display:flex;gap:10px}
+.msg{min-height:1.4em;margin:12px 0 0;font-size:14px;text-align:center}
+.msg.err{color:var(--bad)}.msg.ok{color:var(--ok)}
+.links{display:flex;justify-content:space-between;gap:12px;margin-top:16px;font-size:14px}
+.links a{color:var(--mute)}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<main class="card">
+  <h1>Квіз і карта</h1>
+
+  <div class="tabs" role="tablist">
+    <button class="tab" id="tab-login" role="tab" aria-selected="true" type="button">Увійти</button>
+    <button class="tab" id="tab-signup" role="tab" aria-selected="false" type="button">Реєстрація</button>
+  </div>
+
+  <form id="form" novalidate>
+    <label id="name-row" hidden>Нікнейм
+      <input type="text" id="name" minlength="2" maxlength="30" autocomplete="username">
+    </label>
+    <label>Email
+      <input type="email" id="email" required autocomplete="email">
+    </label>
+    <label>Пароль
+      <input type="password" id="pass" required minlength="6" autocomplete="current-password">
+    </label>
+    <button class="btn" id="submit" type="submit">Увійти</button>
+  </form>
+
+  <div class="or">або</div>
+  <div class="oauth">
+    <button class="btn ghost" id="github" type="button">GitHub</button>
+    <button class="btn ghost" id="google" type="button">Google</button>
+  </div>
+
+  <p class="msg" id="msg" role="status" aria-live="polite"></p>
+
+  <div class="links">
+    <a href="index.html">← На початкову</a>
+    <a href="app.html">Грати без входу</a>
+  </div>
+</main>
+
+<script type="module">
+const $ = id => document.getElementById(id);
+const msg = $('msg');
+let mode = 'login';
+let authApi, supabase;
+
+function say(text, kind) { msg.textContent = text || ''; msg.className = 'msg' + (kind ? ' ' + kind : ''); }
+function goHome() { location.href = 'app.html'; }
+
+function setMode(next) {
+  mode = next;
+  const signup = mode === 'signup';
+  $('tab-login').setAttribute('aria-selected', String(!signup));
+  $('tab-signup').setAttribute('aria-selected', String(signup));
+  $('name-row').hidden = !signup;
+  $('name').required = signup;
+  $('pass').autocomplete = signup ? 'new-password' : 'current-password';
+  $('submit').textContent = signup ? 'Зареєструватися' : 'Увійти';
+  say('');
+  history.replaceState(null, '', signup ? '#signup' : location.pathname);
+}
+
+$('tab-login').onclick = () => setMode('login');
+$('tab-signup').onclick = () => setMode('signup');
+setMode(location.hash === '#signup' ? 'signup' : 'login');
+
+try {
+  ({ authApi, supabase } = await import('./supabase-client.js'));
+  // Уже ввійшов — переходимо на головну; також спрацьовує після повернення з GitHub/Google.
+  const { data: { session } } = await supabase.auth.getSession();
+  if (session) goHome();
+} catch (e) {
+  console.warn('Supabase недоступний:', e);
+  say('Вхід зараз недоступний. Можна грати без входу.', 'err');
+}
+
+$('form').addEventListener('submit', async e => {
+  e.preventDefault();
+  if (!authApi) return say('Вхід зараз недоступний. Можна грати без входу.', 'err');
+  const email = $('email').value.trim();
+  const password = $('pass').value;
+  const name = $('name').value.trim();
+  if (!email || !password) return say('Введіть email і пароль.', 'err');
+  if (mode === 'signup' && name.length < 2) return say('Нікнейм має містити щонайменше 2 символи.', 'err');
+  $('submit').disabled = true;
+  say('Зачекайте…');
+  try {
+    if (mode === 'signup') {
+      const data = await authApi.signUp(email, password, name);
+      if (data.session) return goHome();
+      setMode('login');
+      say('Лист для підтвердження надіслано. Підтвердіть пошту, а потім увійдіть.', 'ok');
+    } else {
+      await authApi.signIn(email, password);
+      goHome();
+    }
+  } catch (err) {
+    say(err.message || 'Не вдалося виконати вхід.', 'err');
+  } finally {
+    $('submit').disabled = false;
+  }
+});
+
+for (const provider of ['github', 'google']) {
+  $(provider).onclick = async () => {
+    if (!authApi) return say('Вхід зараз недоступний. Можна грати без входу.', 'err');
+    try { await authApi.signInWithOAuth(provider); }
+    catch (err) { say(err.message || 'Не вдалося почати вхід.', 'err'); }
+  };
+}
+</script>
+</body>
+</html>
