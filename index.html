@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Квіз і карта — вхід</title>
+<style>
+:root{--bg:#e9f1f4;--card:#fff;--ink:#12263a;--mute:#5b6f80;--line:#c6d6df;--acc:#2447d6;--acc-ink:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1b28;--card:#152838;--ink:#e6eef3;--mute:#8ea4b5;--line:#2a4256;--acc:#6f8cff;--acc-ink:#0d1b28}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px;background:var(--bg);color:var(--ink);font:16px/1.5 "Segoe UI",system-ui,-apple-system,Roboto,sans-serif}
+.card{width:100%;max-width:460px;background:var(--card);border:2px solid var(--ink);border-radius:18px;padding:28px 24px;box-shadow:5px 5px 0 var(--ink);text-align:center}
+.logo{font-size:44px;line-height:1;margin-bottom:8px}
+h1{margin:0 0 8px;font-size:28px}
+p{margin:0 0 20px;color:var(--mute)}
+.actions{display:flex;flex-direction:column;gap:10px}
+.btn{display:block;text-decoration:none;text-align:center;border-radius:12px;padding:13px 22px;font:inherit;font-weight:700;border:2px solid var(--ink);background:var(--acc);color:var(--acc-ink)}
+.btn.ghost{background:none;color:var(--ink)}
+.btn:focus-visible{outline:3px solid var(--acc);outline-offset:3px}
+.note{margin:18px 0 0;font-size:14px;color:var(--mute)}
+</style>
+</head>
+<body>
+<main class="card">
+  <div class="logo" aria-hidden="true">🗺️</div>
+  <h1>Квіз і карта</h1>
+  <p>Вікторини за темами, гра «Де це?» на карті та майстерня власних питань.</p>
+  <div class="actions">
+    <a class="btn" href="login.html">Увійти</a>
+    <a class="btn ghost" href="login.html#signup">Реєстрація</a>
+    <a class="btn ghost" href="app.html">Грати без входу</a>
+  </div>
+  <p class="note" id="note" hidden></p>
+</main>
+
+<script type="module">
+// Якщо користувач уже ввійшов — одразу переходимо до головної сторінки (app.html).
+// Якщо Supabase недоступний, сторінка просто лишається з кнопками вище.
+try {
+  const { supabase } = await import('./supabase-client.js');
+  const { data: { session } } = await supabase.auth.getSession();
+  if (session) {
+    location.replace('app.html');
+  }
+} catch (e) {
+  console.warn('Перевірка входу недоступна:', e);
+  const note = document.getElementById('note');
+  note.textContent = 'Вхід тимчасово недоступний — можна грати без входу.';
+  note.hidden = false;
+}
+</script>
+</body>
+</html>
