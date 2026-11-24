@@ -120,8 +120,8 @@ export const authApi = {
   async signInWithOAuth(provider) {
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider,
-      // повертаємо користувача на ту саму сторінку (папку сайту), файлу auth-callback.html у проєкті немає
-      options: { redirectTo: new URL('./', window.location.href).href }
+      // після входу через GitHub/Google повертаємо користувача на головну сторінку застосунку
+      options: { redirectTo: new URL('app.html', window.location.href).href }
     });
     if (error) throw error;
     return data;
